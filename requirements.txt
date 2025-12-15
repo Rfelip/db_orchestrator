@@ -1,0 +1,5 @@
+SQLAlchemy
+python-dotenv
+ruamel.yaml
+Jinja2
+requests
