@@ -21,8 +21,6 @@ class YamlManager:
         self.manifest_path = Path(manifest_path)
         self.yaml = YAML()
         self.yaml.preserve_quotes = True
-        # Set indentation: mapping=2, sequence=2, offset=2
-        self.yaml.indent(mapping=2, sequence=2, offset=2)
 
     def load_manifest(self):
         """
