@@ -20,7 +20,7 @@ class Executor:
     The main orchestrator class responsible for executing the workflow defined in the manifest.
     """
 
-    def __init__(self, manifest_path, db_config, notifier_config, dry_run=False):
+    def __init__(self, manifest_path, db_config, notifier_config, dry_run=False, force=False):
         """
         Initialize the Executor.
 
@@ -29,10 +29,12 @@ class Executor:
             db_config (dict): Database connection details.
             notifier_config (dict): Notification settings.
             dry_run (bool): If True, only print the plan and exit.
+            force (bool): If True, skip user confirmation.
         """
         self.manifest_path = manifest_path
         self.db_config = db_config
         self.dry_run = dry_run
+        self.force = force
         
         self.yaml_manager = YamlManager(manifest_path)
         self.notifier = Notifier(
@@ -90,9 +92,12 @@ class Executor:
             return
 
         # 3. User Confirmation
-        if not self._get_user_confirmation(len(execution_queue)):
-            log.info("Execution aborted by user.")
-            sys.exit(0)
+        if not self.force:
+            if not self._get_user_confirmation(len(execution_queue)):
+                log.info("Execution aborted by user.")
+                sys.exit(0)
+        else:
+            log.info("Force flag detected. Skipping user confirmation.")
 
         # 4. Active Execution Loop
         self.notifier.send_alert("Job Started", f"Starting execution of {len(execution_queue)} tasks.")
