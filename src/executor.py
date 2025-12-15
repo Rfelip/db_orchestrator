@@ -10,7 +10,7 @@ from src.yaml_manager import YamlManager
 from src.parser import SQLParser
 from src.notifier import Notifier
 from src.utils import render_template
-from config.settings import load_config  # Assuming we implement this or load env here
+from config.settings import load_settings  # Assuming we implement this or load env here
 
 # Setup local logger
 log = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class Executor:
         Args:
             manifest_path (str): Path to manifest.yaml.
             db_config (dict): Database connection details.
-            notifier_config (dict): Notification settings (not fully used in this simplified version).
+            notifier_config (dict): Notification settings.
             dry_run (bool): If True, only print the plan and exit.
         """
         self.manifest_path = manifest_path
@@ -35,7 +35,10 @@ class Executor:
         self.dry_run = dry_run
         
         self.yaml_manager = YamlManager(manifest_path)
-        self.notifier = Notifier() # Initialize with defaults/env vars as per notifier.py
+        self.notifier = Notifier(
+            telegram_token=notifier_config.get('token'),
+            telegram_chat_id=notifier_config.get('chat_id')
+        )
         
         # We delay DB initialization until we actually need it to avoid connection setup in dry-run if desired,
         # but for simplicity we can init it or just the url.
