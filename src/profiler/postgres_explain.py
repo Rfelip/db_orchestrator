@@ -133,3 +133,8 @@ class PostgresExplainProfiler(ProfilerStrategy):
                 json.dump(self.raw_plan_json, f, indent=2)
         except Exception as e:
             log.error(f"Failed to save Postgres plan to {path}: {e}")
+
+    def get_plan_content(self) -> str:
+        if not self.raw_plan_json:
+            return "No Plan Captured"
+        return json.dumps(self.raw_plan_json, indent=2)

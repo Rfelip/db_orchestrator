@@ -4,12 +4,15 @@ import logging
 import argparse
 import subprocess
 from pathlib import Path
+from datetime import datetime
 
 from src.database import DatabaseManager
 from src.yaml_manager import YamlManager
 from src.parser import SQLParser
 from src.notifier import Notifier
 from src.utils import render_template
+from src.reporter import Reporter
+from src.profiler import OracleMonitorProfiler, PostgresExplainProfiler
 from config.settings import load_settings  # Assuming we implement this or load env here
 
 # Setup local logger
@@ -41,6 +44,10 @@ class Executor:
             telegram_token=notifier_config.get('token'),
             telegram_chat_id=notifier_config.get('chat_id')
         )
+        
+        # Initialize Reporter with a timestamped directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.reporter = Reporter(Path(f"reports/{timestamp}"))
         
         # We delay DB initialization until we actually need it to avoid connection setup in dry-run if desired,
         # but for simplicity we can init it or just the url.
@@ -117,15 +124,6 @@ class Executor:
                 log.info(f"Processing step: {step_name}")
 
                 # Transaction Management
-                # If group changes or is None (which implies autocommit/single transaction per step usually, 
-                # but here we might treat None as isolated).
-                # Logic: If step_group is different from current_group:
-                # Commit previous if exists.
-                # If step_group is set, start new 'logical' transaction tracking.
-                
-                # Note: SQLAlchemy session controls transactions. 
-                # If we reuse session, we are in a transaction until commit.
-                
                 if step_group != current_group:
                     if current_session:
                         log.info(f"Committing transaction group {current_group}")
@@ -139,10 +137,8 @@ class Executor:
                         log.info(f"Started transaction group {current_group}")
                     else:
                         current_group = None
-                        # If no group, we might want a fresh session for this step
                         current_session = db_manager.get_session()
 
-                # Ensure we have a session (even if just for this step)
                 if not current_session:
                     current_session = db_manager.get_session()
 
@@ -162,11 +158,9 @@ class Executor:
                             current_session.commit()
                             current_session.close()
                             current_session = None
-                            current_group = None # Reset group tracking
+                            current_group = None 
                         
                         self._execute_python_step(step)
-                        
-                        # Re-open session for next steps if needed (next iteration handles it)
                     else:
                         log.warning(f"Unknown step type: {step_type}")
                         continue
@@ -176,7 +170,7 @@ class Executor:
                     # Post-Process
                     self.yaml_manager.disable_step(step_name)
                     
-                    if step.get('notify') or duration > 5: # Threshold example
+                    if step.get('notify') or duration > 5:
                         self.notifier.send_alert(
                             "Step Completed", 
                             f"Step '{step_name}' completed in {duration:.2f}s."
@@ -187,13 +181,16 @@ class Executor:
                     if current_session:
                         current_session.rollback()
                     self.notifier.send_alert("Step Failed", f"Step '{step_name}' failed: {e}")
-                    raise # Stop execution
+                    raise 
 
             # Final Commit for any open session
             if current_session:
                 current_session.commit()
                 current_session.close()
 
+            # Generate Report
+            self.reporter.generate_report(db_info=self.db_config.get('dialect', 'Unknown'))
+            
             log.info("All tasks completed successfully.")
             self.notifier.send_alert("Job Finished", "All tasks completed successfully.")
 
@@ -206,7 +203,7 @@ class Executor:
                 db_manager.close()
 
     def _execute_sql_step(self, step, db_manager, session):
-        """Handles SQL/PLSQL execution with retries."""
+        """Handles SQL/PLSQL execution with retries and profiling."""
         file_path = Path('scripts/sql') / step['file']
         raw_sql = SQLParser.read_sql_file(file_path)
         
@@ -214,6 +211,17 @@ class Executor:
         params = step.get('params', {})
         final_sql = render_template(raw_sql, params)
         
+        # Initialize Profiler
+        profiler = None
+        dialect = self.db_config.get('dialect', '').lower()
+        if 'oracle' in dialect:
+            profiler = OracleMonitorProfiler(session)
+        elif 'postgres' in dialect:
+            profiler = PostgresExplainProfiler()
+        
+        if profiler:
+            final_sql = profiler.prepare_query(final_sql)
+
         retries = 3
         for attempt in range(retries + 1):
             try:
@@ -221,20 +229,37 @@ class Executor:
                 
                 # Output handling
                 if step.get('output_file'):
-                    # This logic assumes a SELECT that returns rows
-                    # SQLAlchemy result.fetchall()
                     rows = result.fetchall()
                     if rows:
                         out_path = Path(step['output_file'])
                         out_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(out_path, 'w', encoding='utf-8') as f:
-                            # Basic CSV-like write
-                            # Header
                             if result.keys():
                                 f.write(','.join(result.keys()) + '\n')
                             for row in rows:
                                 f.write(','.join(map(str, row)) + '\n')
                         log.info(f"Output written to {out_path}")
+                
+                # Profiling Capture
+                if profiler:
+                    try:
+                        profiler.post_execution_capture(result.cursor if hasattr(result, 'cursor') else result, result)
+                        metrics = profiler.get_metrics()
+                        
+                        # Save execution plan (it's stored in profiler internally, but we can write it too if needed, 
+                        # but Reporter handles it via plan_content argument usually?) 
+                        # Ah, Reporter.add_task_result takes plan_content string.
+                        
+                        plan_content = profiler.get_plan_content()
+                            
+                        self.reporter.add_task_result(
+                            task_name=step['name'],
+                            db_type=dialect.split('+')[0].upper(),
+                            metrics=metrics,
+                            plan_content=plan_content
+                        )
+                    except Exception as pe:
+                        log.error(f"Profiling failed for step '{step['name']}': {pe}")
                 
                 break # Success
             except Exception as e:

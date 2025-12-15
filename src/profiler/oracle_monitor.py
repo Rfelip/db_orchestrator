@@ -138,3 +138,6 @@ class OracleMonitorProfiler(ProfilerStrategy):
                 f.write(self.execution_plan)
         except Exception as e:
             log.error(f"Failed to save execution plan to {path}: {e}")
+
+    def get_plan_content(self) -> str:
+        return self.execution_plan

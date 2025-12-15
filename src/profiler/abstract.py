@@ -57,3 +57,10 @@ class ProfilerStrategy(ABC):
             path (str): The file path to save the plan.
         """
         pass
+
+    @abstractmethod
+    def get_plan_content(self) -> str:
+        """
+        Returns the captured execution plan as a string.
+        """
+        pass
