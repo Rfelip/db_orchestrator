@@ -18,7 +18,8 @@ def load_settings():
         'user': os.getenv('DB_USER'),
         'password': os.getenv('DB_PASS'),
         'service': os.getenv('DB_SERVICE'), # For Oracle
-        'database': os.getenv('DB_DATABASE') # For PostgreSQL
+        'database': os.getenv('DB_DATABASE'), # For PostgreSQL
+        'use_diagnostics_pack': os.getenv('USE_DIAGNOSTICS_PACK', 'true').lower() == 'true'
     }
 
     # Validate essential DB settings

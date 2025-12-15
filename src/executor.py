@@ -215,7 +215,8 @@ class Executor:
         profiler = None
         dialect = self.db_config.get('dialect', '').lower()
         if 'oracle' in dialect:
-            profiler = OracleMonitorProfiler(session)
+            use_diagnostics = self.db_config.get('use_diagnostics_pack', True)
+            profiler = OracleMonitorProfiler(session, use_diagnostics_pack=use_diagnostics)
         elif 'postgres' in dialect:
             profiler = PostgresExplainProfiler()
         

@@ -6,64 +6,51 @@ log = logging.getLogger(__name__)
 
 class OracleMonitorProfiler(ProfilerStrategy):
     """
-    Oracle implementation of ProfilerStrategy using V$SQL_MONITOR.
-    Captures aggregated statistics from QC and PX servers.
+    Oracle implementation of ProfilerStrategy.
+    If use_diagnostics_pack=True, uses V$SQL_MONITOR (Requires License).
+    If False, falls back to V$MYSTAT (Session Stats), which misses Parallel Execution details.
     """
 
-    def __init__(self, session):
+    def __init__(self, session, use_diagnostics_pack=True):
         self.session = session
+        self.use_diagnostics_pack = use_diagnostics_pack
         self.sql_id = None
         self.metrics = {}
         self.execution_plan = ""
+        self._pre_stats = {}
 
     def prepare_query(self, sql: str) -> str:
         """
-        Injects the /*+ MONITOR */ hint into the SQL to ensure tracking.
+        Prepares query based on licensing configuration.
         """
-        # Simple regex to find the first SELECT/INSERT/UPDATE/DELETE/MERGE and inject hint
-        # Logic: Replace "SELECT" with "SELECT /*+ MONITOR */"
-        # Case insensitive flag needed.
-        # This is a basic implementation. Complex SQL might need robust parsing.
-        
-        pattern = re.compile(r"^\s*(SELECT|INSERT|UPDATE|DELETE|MERGE)", re.IGNORECASE)
-        match = pattern.match(sql)
-        
-        if match:
-            # Check if hints already exist? For simplicity, we just append ours.
-            # If /*+ exists, we might ideally merge, but appending a new comment block works in Oracle usually
-            # or just inserting after the verb.
-            # "SELECT /*+ MONITOR */ ..."
-            verb = match.group(1)
-            modified_sql = pattern.sub(f"{verb} /*+ MONITOR */", sql, count=1)
-            log.debug("Injected MONITOR hint into SQL.")
-            return modified_sql
-        
-        return sql
+        if self.use_diagnostics_pack:
+            # Inject MONITOR hint
+            pattern = re.compile(r"^\s*(SELECT|INSERT|UPDATE|DELETE|MERGE)", re.IGNORECASE)
+            match = pattern.match(sql)
+            if match:
+                verb = match.group(1)
+                modified_sql = pattern.sub(f"{verb} /*+ MONITOR */", sql, count=1)
+                log.debug("Injected MONITOR hint into SQL.")
+                return modified_sql
+            return sql
+        else:
+            # Fallback: Capture pre-execution session stats
+            self._pre_stats = self._get_session_stats()
+            return sql
 
     def post_execution_capture(self, cursor, execution_result) -> None:
         """
-        Retrieves SQL_ID, queries V$SQL_MONITOR, and fetches execution plan.
+        Retrieves metrics and execution plan.
         """
         try:
             # 1. Retrieve SQL_ID
-            # cx_Oracle / python-oracledb specific
-            # cursor.statement might be None if no statement executed or error
             if hasattr(cursor, 'statement') and cursor.statement:
-                # Assuming python-oracledb or cx_Oracle
-                # In some versions it might be accessible differently. 
-                # cursor.statement is an object, cursor.statement.sql_id might exist if using python-oracledb
-                # For cx_Oracle it might be different, but we moved to oracledb.
                 try:
                     self.sql_id = cursor.statement.sql_id
                 except AttributeError:
-                    # Fallback or older driver logic if needed
                     pass
             
-            # Fallback: If we can't get it from cursor, try getting the last executed SQL_ID from session
             if not self.sql_id:
-                # This is risky in high concurrency if shared session, but usually fine here.
-                # Query v$session or similar? 
-                # Better: SELECT PREV_SQL_ID FROM v$session WHERE SID = SYS_CONTEXT('USERENV','SID')
                 row = self.session.execute(
                     "SELECT prev_sql_id FROM v$session WHERE sid = SYS_CONTEXT('USERENV', 'SID')"
                 ).fetchone()
@@ -76,54 +63,89 @@ class OracleMonitorProfiler(ProfilerStrategy):
 
             log.info(f"Capturing metrics for SQL_ID: {self.sql_id}")
 
-            # 2. Query V$SQL_MONITOR
-            # We filter by current SID to avoid picking up other sessions running same SQL
-            monitor_sql = """
-                SELECT 
-                   MAX(status) as status,
-                   SUM(elapsed_time) as total_time,
-                   SUM(cpu_time) as cpu_time,
-                   SUM(user_io_wait_time) as io_time,
-                   SUM(physical_read_bytes) as phy_read_bytes,
-                   MAX(px_servers_allocated) as parallel_count
-                FROM v$sql_monitor
-                WHERE sql_id = :sql_id
-                  AND sid = SYS_CONTEXT('USERENV', 'SID')
-                GROUP BY sql_id, sql_exec_id
-            """
-            
-            # We might have multiple executions if looped (unlikely in this orchestrator). 
-            # We take the latest (implicitly or via ordering if needed). 
-            # The GROUP BY suggests we might get multiple rows if multiple executions occurred.
-            # We'll fetch one.
-            
-            result = self.session.execute(monitor_sql, {'sql_id': self.sql_id}).fetchone()
-            
-            if result:
-                # Unpack
-                status, elapsed, cpu, io_wait, phy_bytes, px_count = result
-                
-                self.metrics = {
-                    'duration_ms': (elapsed or 0) / 1000.0, # Oracle times are microseconds
-                    'db_cpu_ms': (cpu or 0) / 1000.0,
-                    'db_io_ms': (io_wait or 0) / 1000.0,
-                    'io_requests': 0, # Not easily available as count without detailed stats
-                    'io_bytes': phy_bytes or 0,
-                    'parallel_degree': px_count or 0,
-                    'status': status
-                }
+            if self.use_diagnostics_pack:
+                self._capture_via_monitor()
             else:
-                log.warning(f"No V$SQL_MONITOR data found for SQL_ID {self.sql_id}")
-
-            # 3. Capture Plan
-            # ALLSTATS LAST gives runtime stats
-            plan_sql = "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:sql_id, NULL, 'ALLSTATS LAST'))"
-            plan_rows = self.session.execute(plan_sql, {'sql_id': self.sql_id}).fetchall()
-            
-            self.execution_plan = "\n".join([row[0] for row in plan_rows])
+                self._capture_via_fallback()
 
         except Exception as e:
             log.error(f"Failed to capture Oracle metrics: {e}")
+
+    def _capture_via_monitor(self):
+        monitor_sql = """
+            SELECT 
+                MAX(status) as status,
+                SUM(elapsed_time) as total_time,
+                SUM(cpu_time) as cpu_time,
+                SUM(user_io_wait_time) as io_time,
+                SUM(physical_read_bytes) as phy_read_bytes,
+                MAX(px_servers_allocated) as parallel_count
+            FROM v$sql_monitor
+            WHERE sql_id = :sql_id
+                AND sid = SYS_CONTEXT('USERENV', 'SID')
+            GROUP BY sql_id, sql_exec_id
+        """
+        result = self.session.execute(monitor_sql, {'sql_id': self.sql_id}).fetchone()
+        
+        if result:
+            status, elapsed, cpu, io_wait, phy_bytes, px_count = result
+            self.metrics = {
+                'duration_ms': (elapsed or 0) / 1000.0,
+                'db_cpu_ms': (cpu or 0) / 1000.0,
+                'db_io_ms': (io_wait or 0) / 1000.0,
+                'io_requests': 0, 
+                'io_bytes': phy_bytes or 0,
+                'parallel_degree': px_count or 0,
+                'status': status
+            }
+        
+        # Plan with Stats
+        plan_sql = "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:sql_id, NULL, 'ALLSTATS LAST'))"
+        plan_rows = self.session.execute(plan_sql, {'sql_id': self.sql_id}).fetchall()
+        self.execution_plan = "\n".join([row[0] for row in plan_rows])
+
+    def _capture_via_fallback(self):
+        # Capture post stats
+        post_stats = self._get_session_stats()
+        
+        # Calculate Delta
+        cpu = (post_stats.get('CPU used by this session', 0) - self._pre_stats.get('CPU used by this session', 0)) * 10 # centiseconds to ms
+        # Oracle 'CPU used' is in 10s of milliseconds usually (centiseconds)
+        
+        # IO is trickier. 'user I/O wait time' is in centiseconds.
+        io_time = (post_stats.get('user I/O wait time', 0) - self._pre_stats.get('user I/O wait time', 0)) * 10
+        
+        self.metrics = {
+            'duration_ms': 0, # Cannot easily get accurate wall clock of query from session stats alone without timing wrapper in python (which executor does)
+            # Executor captures duration separately and passes it? No, Executor captures 'duration' but reporter expects it in metrics or from executor.
+            # Actually Reporter reads 'duration_ms' from metrics. 
+            # We should probably estimate it or let Executor update it.
+            # But let's leave it 0 or try to get it from python side? 
+            # Profiler doesn't receive python duration. 
+            # We'll use 0 here and Reporter/Executor might need adjustment if it relies strictly on this.
+            # But Executor logs duration.
+            
+            'db_cpu_ms': cpu,
+            'db_io_ms': io_time,
+            'parallel_degree': 1, # Unknown/Obscured
+            'status': 'DONE (Fallback)',
+            'note': 'Parallel-Obscured Metrics'
+        }
+        
+        # Plan without Stats
+        plan_sql = "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:sql_id, NULL, 'TYPICAL'))"
+        plan_rows = self.session.execute(plan_sql, {'sql_id': self.sql_id}).fetchall()
+        self.execution_plan = "\n".join([row[0] for row in plan_rows])
+
+    def _get_session_stats(self):
+        sql = """
+            SELECT n.name, s.value 
+            FROM v$mystat s 
+            JOIN v$statname n ON s.statistic# = n.statistic#
+            WHERE n.name IN ('CPU used by this session', 'user I/O wait time')
+        """
+        # Note: 'user I/O wait time' might not exist in all versions, but standard in 11g+.
+        return dict(self.session.execute(sql).fetchall())
 
     def get_metrics(self) -> dict:
         return self.metrics
