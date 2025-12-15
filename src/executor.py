@@ -226,7 +226,9 @@ class Executor:
         retries = 3
         for attempt in range(retries + 1):
             try:
+                start_exec = time.time()
                 result = db_manager.execute_query(final_sql, session=session)
+                duration_exec = time.time() - start_exec
                 
                 # Output handling
                 if step.get('output_file'):
@@ -247,9 +249,9 @@ class Executor:
                         profiler.post_execution_capture(result.cursor if hasattr(result, 'cursor') else result, result)
                         metrics = profiler.get_metrics()
                         
-                        # Save execution plan (it's stored in profiler internally, but we can write it too if needed, 
-                        # but Reporter handles it via plan_content argument usually?) 
-                        # Ah, Reporter.add_task_result takes plan_content string.
+                        # Backfill duration if missing (e.g. Oracle Fallback)
+                        if metrics.get('duration_ms', 0) == 0:
+                            metrics['duration_ms'] = duration_exec * 1000.0
                         
                         plan_content = profiler.get_plan_content()
                             
