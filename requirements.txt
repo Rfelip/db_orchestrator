@@ -3,5 +3,5 @@ python-dotenv
 ruamel.yaml
 Jinja2
 requests
-cx_Oracle
+oracledb
 psycopg2-binary
