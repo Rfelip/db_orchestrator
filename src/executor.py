@@ -204,7 +204,7 @@ class Executor:
 
     def _execute_sql_step(self, step, db_manager, session):
         """Handles SQL/PLSQL execution with retries and profiling."""
-        file_path = Path('scripts/sql') / step['file']
+        file_path = Path(step['file'])
         raw_sql = SQLParser.read_sql_file(file_path)
         
         # Apply Templates
@@ -276,7 +276,7 @@ class Executor:
 
     def _execute_python_step(self, step):
         """Handles external Python script execution."""
-        file_path = Path('scripts/python') / step['file']
+        file_path = Path(step['file'])
         if not file_path.exists():
             raise FileNotFoundError(f"Python script not found: {file_path}")
 

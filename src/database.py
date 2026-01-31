@@ -26,6 +26,21 @@ class DatabaseManager:
     def _setup_engine(self):
         """Creates the SQLAlchemy engine."""
         try:
+            # Oracle Thick Mode Support
+            if 'oracle' in self.db_url:
+                try:
+                    import oracledb
+                    # Attempt to init thick mode if path exists, otherwise let it default or fail later
+                    lib_dir = r"C:\instantclient_23_8"
+                    try:
+                        oracledb.init_oracle_client(lib_dir=lib_dir)
+                        log.info(f"Initialized Oracle Instant Client from {lib_dir}")
+                    except oracledb.DatabaseError as e:
+                        # Error if already initialized or path invalid
+                        log.warning(f"Oracle client init warning (might be already init): {e}")
+                except ImportError:
+                    log.warning("oracledb not installed, but oracle dialect used.")
+
             # pool_pre_ping=True helps recover from stale connections
             self.engine = create_engine(self.db_url, pool_pre_ping=True)
             self.Session = scoped_session(sessionmaker(bind=self.engine))
