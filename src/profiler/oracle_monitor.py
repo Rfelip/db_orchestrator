@@ -1,5 +1,6 @@
 import logging
 import re
+from sqlalchemy import text
 from src.profiler.abstract import ProfilerStrategy
 
 log = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ class OracleMonitorProfiler(ProfilerStrategy):
             
             if not self.sql_id:
                 row = self.session.execute(
-                    "SELECT prev_sql_id FROM v$session WHERE sid = SYS_CONTEXT('USERENV', 'SID')"
+                    text("SELECT prev_sql_id FROM v$session WHERE sid = SYS_CONTEXT('USERENV', 'SID')")
                 ).fetchone()
                 if row:
                     self.sql_id = row[0]
@@ -72,7 +73,7 @@ class OracleMonitorProfiler(ProfilerStrategy):
             log.error(f"Failed to capture Oracle metrics: {e}")
 
     def _capture_via_monitor(self):
-        monitor_sql = """
+        monitor_sql = text("""
             SELECT 
                 MAX(status) as status,
                 SUM(elapsed_time) as total_time,
@@ -84,7 +85,7 @@ class OracleMonitorProfiler(ProfilerStrategy):
             WHERE sql_id = :sql_id
                 AND sid = SYS_CONTEXT('USERENV', 'SID')
             GROUP BY sql_id, sql_exec_id
-        """
+        """)
         result = self.session.execute(monitor_sql, {'sql_id': self.sql_id}).fetchone()
         
         if result:
@@ -100,7 +101,7 @@ class OracleMonitorProfiler(ProfilerStrategy):
             }
         
         # Plan with Stats
-        plan_sql = "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:sql_id, NULL, 'ALLSTATS LAST'))"
+        plan_sql = text("SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:sql_id, NULL, 'ALLSTATS LAST'))")
         plan_rows = self.session.execute(plan_sql, {'sql_id': self.sql_id}).fetchall()
         self.execution_plan = "\n".join([row[0] for row in plan_rows])
 
@@ -122,17 +123,17 @@ class OracleMonitorProfiler(ProfilerStrategy):
         }
         
         # Plan without Stats
-        plan_sql = "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:sql_id, NULL, 'TYPICAL'))"
+        plan_sql = text("SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:sql_id, NULL, 'TYPICAL'))")
         plan_rows = self.session.execute(plan_sql, {'sql_id': self.sql_id}).fetchall()
         self.execution_plan = "\n".join([row[0] for row in plan_rows])
 
     def _get_session_stats(self):
-        sql = """
+        sql = text("""
             SELECT n.name, s.value 
             FROM v$mystat s 
             JOIN v$statname n ON s.statistic# = n.statistic#
             WHERE n.name IN ('CPU used by this session', 'user I/O wait time')
-        """
+        """)
         return dict(self.session.execute(sql).fetchall())
 
     def get_metrics(self) -> dict:
