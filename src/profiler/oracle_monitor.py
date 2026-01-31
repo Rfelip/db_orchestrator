@@ -108,26 +108,15 @@ class OracleMonitorProfiler(ProfilerStrategy):
         # Capture post stats
         post_stats = self._get_session_stats()
         
-        # Calculate Delta
-        cpu = (post_stats.get('CPU used by this session', 0) - self._pre_stats.get('CPU used by this session', 0)) * 10 # centiseconds to ms
-        # Oracle 'CPU used' is in 10s of milliseconds usually (centiseconds)
-        
-        # IO is trickier. 'user I/O wait time' is in centiseconds.
+        # Calculate Delta (centiseconds to ms)
+        cpu = (post_stats.get('CPU used by this session', 0) - self._pre_stats.get('CPU used by this session', 0)) * 10 
         io_time = (post_stats.get('user I/O wait time', 0) - self._pre_stats.get('user I/O wait time', 0)) * 10
         
         self.metrics = {
-            'duration_ms': 0, # Cannot easily get accurate wall clock of query from session stats alone without timing wrapper in python (which executor does)
-            # Executor captures duration separately and passes it? No, Executor captures 'duration' but reporter expects it in metrics or from executor.
-            # Actually Reporter reads 'duration_ms' from metrics. 
-            # We should probably estimate it or let Executor update it.
-            # But let's leave it 0 or try to get it from python side? 
-            # Profiler doesn't receive python duration. 
-            # We'll use 0 here and Reporter/Executor might need adjustment if it relies strictly on this.
-            # But Executor logs duration.
-            
+            'duration_ms': 0, # Placeholder; Executor should fill with wall clock
             'db_cpu_ms': cpu,
             'db_io_ms': io_time,
-            'parallel_degree': 1, # Unknown/Obscured
+            'parallel_degree': 1, # Unknown in fallback
             'status': 'DONE (Fallback)',
             'note': 'Parallel-Obscured Metrics'
         }
@@ -144,7 +133,6 @@ class OracleMonitorProfiler(ProfilerStrategy):
             JOIN v$statname n ON s.statistic# = n.statistic#
             WHERE n.name IN ('CPU used by this session', 'user I/O wait time')
         """
-        # Note: 'user I/O wait time' might not exist in all versions, but standard in 11g+.
         return dict(self.session.execute(sql).fetchall())
 
     def get_metrics(self) -> dict:

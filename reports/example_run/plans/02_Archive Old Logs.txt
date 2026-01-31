@@ -1,0 +1,14 @@
+
+[
+  {
+    "Plan": {
+      "Node Type": "Seq Scan",
+      "Relation Name": "audit_logs",
+      "Filter": "(created_at < '2023-01-01 00:00:00'::timestamp without time zone)",
+      "Rows Removed by Filter": 500,
+      "Shared Hit Blocks": 200,
+      "Shared Read Blocks": 15000,
+      "Execution Time": 12000.5
+    }
+  }
+]

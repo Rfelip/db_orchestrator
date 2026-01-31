@@ -1,0 +1,47 @@
+{
+  "meta": {
+    "timestamp": "2025-12-15T17:19:26.644624",
+    "db": "Oracle 19c & Postgres 14"
+  },
+  "tasks": [
+    {
+      "name": "Calculate Sales Aggregates",
+      "db_type": "ORACLE",
+      "execution_time_sec": 45.0,
+      "parallel_degree": 4,
+      "profile": {
+        "cpu_time_sec": 120.0,
+        "io_time_sec": 5.0,
+        "bottleneck": "CPU"
+      },
+      "plan_file": "plans/01_Calculate Sales Aggregates.txt",
+      "plan_content": "\n-------------------------------------------------------------------------------------------------------\n| Id  | Operation                  | Name             | Rows  | Bytes | Cost (%CPU)| Time     | Pstart|\n-------------------------------------------------------------------------------------------------------\n|   0 | SELECT STATEMENT           |                  |       |       |   452 (100)|          |       |\n|   1 |  PX COORDINATOR            |                  |       |       |            |          |       |\n|   2 |   PX SEND QC (RANDOM)      | :TQ10001         |     1 |    13 |   452   (2)| 00:00:01 |       |\n|   3 |    HASH GROUP BY           |                  |     1 |    13 |   452   (2)| 00:00:01 |       |\n|   4 |     PX RECEIVE             |                  |   100K|  1269K|   451   (2)| 00:00:01 |       |\n|   5 |      PX SEND HASH          | :TQ10000         |   100K|  1269K|   451   (2)| 00:00:01 |       |\n|   6 |       PX BLOCK ITERATOR    |                  |   100K|  1269K|   451   (2)| 00:00:01 |     1 |\n|*  7 |        TABLE ACCESS FULL   | SALES_FACT       |   100K|  1269K|   451   (2)| 00:00:01 |     1 |\n-------------------------------------------------------------------------------------------------------\n"
+    },
+    {
+      "name": "Archive Old Logs",
+      "db_type": "POSTGRES",
+      "execution_time_sec": 12.0,
+      "parallel_degree": 1,
+      "profile": {
+        "cpu_time_sec": 0.0,
+        "io_time_sec": 0.0,
+        "bottleneck": "I/O"
+      },
+      "plan_file": "plans/02_Archive Old Logs.txt",
+      "plan_content": "\n[\n  {\n    \"Plan\": {\n      \"Node Type\": \"Seq Scan\",\n      \"Relation Name\": \"audit_logs\",\n      \"Filter\": \"(created_at < '2023-01-01 00:00:00'::timestamp without time zone)\",\n      \"Rows Removed by Filter\": 500,\n      \"Shared Hit Blocks\": 200,\n      \"Shared Read Blocks\": 15000,\n      \"Execution Time\": 12000.5\n    }\n  }\n]\n"
+    },
+    {
+      "name": "Update Customer Scores",
+      "db_type": "ORACLE",
+      "execution_time_sec": 25.0,
+      "parallel_degree": 2,
+      "profile": {
+        "cpu_time_sec": 20.0,
+        "io_time_sec": 18.0,
+        "bottleneck": "CPU"
+      },
+      "plan_file": "plans/03_Update Customer Scores.txt",
+      "plan_content": "PLAN_TABLE_OUTPUT\n-----------------\nUPDATE STATEMENT..."
+    }
+  ]
+}
