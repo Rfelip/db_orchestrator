@@ -109,6 +109,10 @@ class Executor:
         # 4. Active Execution Loop
         self.notifier.send_alert("Job Started", f"Starting execution of {len(execution_queue)} tasks.")
         
+        job_start_time = time.time()
+        executed_steps = []
+        failed_step = None
+
         db_manager = None
         current_session = None
         current_group = None
@@ -166,6 +170,7 @@ class Executor:
                         continue
 
                     duration = time.time() - start_time
+                    executed_steps.append({"name": step_name, "duration": duration})
                     
                     # Post-Process
                     self.yaml_manager.disable_step(step_name)
@@ -177,6 +182,7 @@ class Executor:
                         )
 
                 except Exception as e:
+                    failed_step = step_name
                     log.error(f"Error in step '{step_name}': {e}")
                     if current_session:
                         current_session.rollback()
@@ -192,11 +198,38 @@ class Executor:
             self.reporter.generate_report(db_info=self.db_config.get('dialect', 'Unknown'))
             
             log.info("All tasks completed successfully.")
-            self.notifier.send_alert("Job Finished", "All tasks completed successfully.")
+            
+            total_duration = time.time() - job_start_time
+            steps_summary = "\n".join([
+                f"Step {idx+1} - {s['name']} - time taken: {s['duration']:.2f}s"
+                for idx, s in enumerate(executed_steps)
+            ])
+            
+            summary = (
+                f"Job finished successfully.\n\n"
+                f"<b>Total Duration:</b> {total_duration:.2f}s\n\n"
+                f"<b>Executed steps:</b>\n{steps_summary if steps_summary else 'None'}"
+            )
+            
+            self.notifier.send_alert("Job Finished", summary)
 
         except Exception as e:
             log.critical(f"Execution failed: {e}")
-            self.notifier.send_alert("Job Failed", f"Execution stopped due to error: {e}")
+            
+            total_duration = time.time() - job_start_time
+            steps_summary = "\n".join([
+                f"Step {idx+1} - {s['name']} - time taken: {s['duration']:.2f}s"
+                for idx, s in enumerate(executed_steps)
+            ])
+
+            summary = (
+                f"Job execution stopped.\n\n"
+                f"<b>Failed Step:</b> {failed_step if failed_step else 'Unknown'}\n"
+                f"<b>Total Duration:</b> {total_duration:.2f}s\n\n"
+                f"<b>Executed steps:</b>\n{steps_summary if steps_summary else 'None'}"
+            )
+            
+            self.notifier.send_alert("Job Failed", summary)
             sys.exit(1)
         finally:
             if db_manager:
