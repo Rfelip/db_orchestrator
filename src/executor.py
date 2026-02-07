@@ -43,7 +43,8 @@ class Executor:
         
         self.yaml_manager = YamlManager(manifest_path)
         self.notifier = Notifier(
-            webhook_url=notifier_config.get('webhook_url')
+            webhook_url=notifier_config.get('webhook_url'),
+            user_name=notifier_config.get('user_name', 'Unknown')
         )
         
         # Initialize Reporter with a timestamped directory

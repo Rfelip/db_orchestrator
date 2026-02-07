@@ -40,7 +40,8 @@ def load_settings():
         raise ValueError("DB_DATABASE is required for PostgreSQL dialect.")
 
     notifier_config = {
-        'webhook_url': os.getenv('DISCORD_WEBHOOK_URL')
+        'webhook_url': os.getenv('DISCORD_WEBHOOK_URL'),
+        'user_name': os.getenv('USER_NAME', 'Unknown')
     }
 
     if not notifier_config['webhook_url']:

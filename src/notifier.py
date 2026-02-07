@@ -10,8 +10,9 @@ class Notifier:
     """
     Sends notifications to a Discord channel via webhook.
     """
-    def __init__(self, webhook_url=None):
+    def __init__(self, webhook_url=None, user_name="Unknown"):
         self.webhook_url = webhook_url
+        self.user_name = user_name
 
         if not self.webhook_url:
             log.warning("Discord notifications disabled: no webhook URL provided.")
@@ -23,7 +24,7 @@ class Notifier:
 
     def _send_discord(self, subject, message_body):
         """Sends a message via Discord webhook with retries."""
-        full_message = f"**{subject}**\n\n{message_body}"
+        full_message = f"**{subject}** (by {self.user_name})\n\n{message_body}"
         payload = {'content': full_message}
         for attempt in range(MAX_RETRIES):
             try:
