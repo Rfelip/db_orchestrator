@@ -212,8 +212,8 @@ class Executor:
             
             summary = (
                 f"Job finished successfully.\n\n"
-                f"<b>Total Duration:</b> {total_duration:.2f}s\n\n"
-                f"<b>Executed steps:</b>\n{steps_summary if steps_summary else 'None'}"
+                f"**Total Duration:** {total_duration:.2f}s\n\n"
+                f"**Executed steps:**\n{steps_summary if steps_summary else 'None'}"
             )
             
             self.notifier.send_alert("Job Finished", summary)
@@ -229,9 +229,9 @@ class Executor:
 
             summary = (
                 f"Job execution stopped.\n\n"
-                f"<b>Failed Step:</b> {failed_step if failed_step else 'Unknown'}\n"
-                f"<b>Total Duration:</b> {total_duration:.2f}s\n\n"
-                f"<b>Executed steps:</b>\n{steps_summary if steps_summary else 'None'}"
+                f"**Failed Step:** {failed_step if failed_step else 'Unknown'}\n"
+                f"**Total Duration:** {total_duration:.2f}s\n\n"
+                f"**Executed steps:**\n{steps_summary if steps_summary else 'None'}"
             )
             
             self.notifier.send_alert("Job Failed", summary)

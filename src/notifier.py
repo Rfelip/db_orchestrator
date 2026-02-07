@@ -5,6 +5,7 @@ import requests
 log = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
+DISCORD_MAX_LENGTH = 2000
 
 class Notifier:
     """
@@ -22,10 +23,49 @@ class Notifier:
         if self.webhook_url:
             self._send_discord(subject, message_body)
 
+    def _split_message(self, header, body):
+        """Splits a message into chunks that fit Discord's character limit."""
+        # First chunk includes the header
+        first_prefix = f"{header}\n\n"
+        cont_prefix = f"{header} (cont.)\n\n"
+
+        chunks = []
+        remaining = body
+
+        while remaining:
+            prefix = first_prefix if not chunks else cont_prefix
+            max_body = DISCORD_MAX_LENGTH - len(prefix)
+
+            if len(remaining) <= max_body:
+                chunks.append(prefix + remaining)
+                break
+
+            # Split at last newline within limit to avoid cutting mid-line
+            cut = remaining[:max_body].rfind('\n')
+            if cut <= 0:
+                cut = max_body
+
+            chunks.append(prefix + remaining[:cut])
+            remaining = remaining[cut:].lstrip('\n')
+
+        return chunks
+
     def _send_discord(self, subject, message_body):
         """Sends a message via Discord webhook with retries."""
-        full_message = f"**{subject}** (by {self.user_name})\n\n{message_body}"
-        payload = {'content': full_message}
+        header = f"**{subject}** (by {self.user_name})"
+        full_message = f"{header}\n\n{message_body}"
+
+        if len(full_message) <= DISCORD_MAX_LENGTH:
+            self._post_message(full_message)
+        else:
+            chunks = self._split_message(header, message_body)
+            for chunk in chunks:
+                self._post_message(chunk)
+                time.sleep(0.5)
+
+    def _post_message(self, content):
+        """Posts a single message to Discord with retries."""
+        payload = {'content': content}
         for attempt in range(MAX_RETRIES):
             try:
                 response = requests.post(self.webhook_url, json=payload, timeout=10)
