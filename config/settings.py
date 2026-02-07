@@ -39,20 +39,16 @@ def load_settings():
         log.error("PostgreSQL dialect chosen but DB_DATABASE is not set.")
         raise ValueError("DB_DATABASE is required for PostgreSQL dialect.")
 
-    telegram_config = {
-        'token': os.getenv('TELEGRAM_BOT_TOKEN'),
-        'chat_id': os.getenv('TELEGRAM_CHAT_ID')
+    notifier_config = {
+        'webhook_url': os.getenv('DISCORD_WEBHOOK_URL')
     }
 
-    # Validate Telegram settings if token is present (chat_id is also needed)
-    if telegram_config['token'] and not telegram_config['chat_id']:
-        log.warning("TELEGRAM_BOT_TOKEN is set, but TELEGRAM_CHAT_ID is missing. Telegram notifications may not work.")
-    elif telegram_config['chat_id'] and not telegram_config['token']:
-         log.warning("TELEGRAM_CHAT_ID is set, but TELEGRAM_BOT_TOKEN is missing. Telegram notifications may not work.")
-    
+    if not notifier_config['webhook_url']:
+        log.warning("DISCORD_WEBHOOK_URL not set. Discord notifications will be disabled.")
+
     return {
         'db': db_config,
-        'telegram': telegram_config
+        'notifier': notifier_config
     }
 
 # Example usage (for testing/debugging, not normally called directly in production)
@@ -61,6 +57,6 @@ if __name__ == "__main__":
         settings = load_settings()
         print("Loaded Settings:")
         print(f"DB Dialect: {settings['db']['dialect']}")
-        print(f"Telegram Token (first 5 chars): {settings['telegram']['token'][:5] if settings['telegram']['token'] else 'N/A'}")
+        print(f"Discord Webhook: {'Configured' if settings['notifier']['webhook_url'] else 'N/A'}")
     except ValueError as e:
         print(f"Error loading settings: {e}")

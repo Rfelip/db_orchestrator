@@ -43,8 +43,7 @@ class Executor:
         
         self.yaml_manager = YamlManager(manifest_path)
         self.notifier = Notifier(
-            telegram_token=notifier_config.get('token'),
-            telegram_chat_id=notifier_config.get('chat_id')
+            webhook_url=notifier_config.get('webhook_url')
         )
         
         # Initialize Reporter with a timestamped directory

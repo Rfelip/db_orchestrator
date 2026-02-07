@@ -48,7 +48,7 @@ def main():
     try:
         settings = load_settings()
         db_config = settings['db']
-        telegram_config = settings['telegram']
+        notifier_config = settings['notifier']
     except Exception as e:
         log.critical(f"Failed to load configuration: {e}")
         sys.exit(1)
@@ -63,7 +63,7 @@ def main():
         executor = Executor(
             manifest_path=manifest_path,
             db_config=db_config,
-            notifier_config=telegram_config,
+            notifier_config=notifier_config,
             dry_run=args.dry_run,
             force=args.force,
             enable_all=args.enable_all
