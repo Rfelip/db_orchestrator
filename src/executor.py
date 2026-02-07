@@ -23,7 +23,7 @@ class Executor:
     The main orchestrator class responsible for executing the workflow defined in the manifest.
     """
 
-    def __init__(self, manifest_path, db_config, notifier_config, dry_run=False, force=False):
+    def __init__(self, manifest_path, db_config, notifier_config, dry_run=False, force=False, enable_all=False):
         """
         Initialize the Executor.
 
@@ -33,11 +33,13 @@ class Executor:
             notifier_config (dict): Notification settings.
             dry_run (bool): If True, only print the plan and exit.
             force (bool): If True, skip user confirmation.
+            enable_all (bool): If True, run all tasks regardless of 'enabled' flag.
         """
         self.manifest_path = manifest_path
         self.db_config = db_config
         self.dry_run = dry_run
         self.force = force
+        self.enable_all = enable_all
         
         self.yaml_manager = YamlManager(manifest_path)
         self.notifier = Notifier(
@@ -71,7 +73,10 @@ class Executor:
             all_steps = manifest.get('steps', [])
             
             # Filter enabled steps
-            execution_queue = [s for s in all_steps if s.get('enabled', True)]
+            if self.enable_all:
+                execution_queue = all_steps
+            else:
+                execution_queue = [s for s in all_steps if s.get('enabled', True)]
             
             log.info(f"Loaded {len(all_steps)} steps. {len(execution_queue)} enabled.")
             

@@ -35,6 +35,12 @@ def main():
         action="store_true",
         help="Skip the user confirmation prompt and execute immediately."
     )
+    parser.add_argument(
+        "--enable-all",
+        "--run-all",
+        action="store_true",
+        help="Run all tasks in the manifest, ignoring the 'enabled: false' flag."
+    )
     
     args = parser.parse_args()
 
@@ -59,7 +65,8 @@ def main():
             db_config=db_config,
             notifier_config=telegram_config,
             dry_run=args.dry_run,
-            force=args.force
+            force=args.force,
+            enable_all=args.enable_all
         )
         executor.run()
 
