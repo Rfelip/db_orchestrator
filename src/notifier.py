@@ -79,7 +79,7 @@ class Notifier:
                 return
             except requests.exceptions.RequestException as e:
                 if attempt < MAX_RETRIES - 1:
-                    wait = 2 ** attempt
+                    wait = 5 * 2 ** attempt
                     log.warning(f"Discord notification failed (attempt {attempt + 1}/{MAX_RETRIES}). Retrying in {wait}s... Error: {e}")
                     time.sleep(wait)
                 else:

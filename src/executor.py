@@ -305,7 +305,7 @@ class Executor:
                 break # Success
             except Exception as e:
                 if attempt < retries:
-                    wait = 2 ** attempt
+                    wait = 5 * 2 ** attempt
                     log.warning(f"Step '{step['name']}' failed. Retrying in {wait}s... Error: {e}")
                     time.sleep(wait)
                 else:
