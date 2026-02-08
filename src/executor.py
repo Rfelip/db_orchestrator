@@ -95,7 +95,8 @@ class Executor:
             s_type = step.get('type', 'UNK').upper()
             s_name = step.get('name', 'Unnamed')
             s_group = step.get('transaction_group', 'None')
-            s_cleanup = f" - Cleanup: {step['cleanup_target']}" if step.get('cleanup_target') else ""
+            s_mode = step.get('cleanup_mode', 'drop') if step.get('cleanup_target') else ''
+            s_cleanup = f" - Cleanup({s_mode}): {step['cleanup_target']}" if step.get('cleanup_target') else ""
             print(f"[{idx}] {s_type}: {s_name} (Group {s_group}){s_cleanup}")
         print("----------------------\n")
 
@@ -154,7 +155,11 @@ class Executor:
                 try:
                     # Pre-flight: Cleanup
                     if step.get('cleanup_target'):
-                        db_manager.drop_table(step['cleanup_target'], current_session)
+                        mode = step.get('cleanup_mode', 'drop')
+                        if mode == 'truncate':
+                            db_manager.truncate_table(step['cleanup_target'], current_session)
+                        else:
+                            db_manager.drop_table(step['cleanup_target'], current_session)
 
                     # Execution
                     start_time = time.time()

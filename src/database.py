@@ -117,6 +117,33 @@ class DatabaseManager:
             log.error(f"Failed to drop table {table_name}: {e}")
             raise
 
+    def truncate_table(self, table_name, session):
+        """
+        Trunca uma tabela, preservando o schema (DDL).
+
+        Args:
+            table_name (str): Nome da tabela a truncar.
+            session (Session): Sessão ativa do banco.
+        """
+        try:
+            inspector = sqlalchemy.inspect(self.engine)
+            exists = inspector.has_table(table_name)
+
+            if not exists and self.engine.dialect.name == 'oracle':
+                exists = inspector.has_table(table_name.upper())
+                if exists:
+                    table_name = table_name.upper()
+
+            if exists:
+                log.info(f"Truncating table: {table_name}")
+                self.execute_query(f"TRUNCATE TABLE {table_name}", session=session)
+            else:
+                log.info(f"Table {table_name} not found. Skipping truncate.")
+
+        except Exception as e:
+            log.error(f"Failed to truncate table {table_name}: {e}")
+            raise
+
     def close(self):
         """Dispose of the engine and close connections."""
         if self.engine:
