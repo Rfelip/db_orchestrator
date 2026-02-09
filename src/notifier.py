@@ -18,10 +18,10 @@ class Notifier:
         if not self.webhook_url:
             log.warning("Discord notifications disabled: no webhook URL provided.")
 
-    def send_alert(self, subject, message_body):
-        """Sends an alert to Discord."""
+    def send_alert(self, subject, message_body, ping=None):
+        """Sends an alert to Discord. If ping is a Discord user ID, prepends a mention."""
         if self.webhook_url:
-            self._send_discord(subject, message_body)
+            self._send_discord(subject, message_body, ping=ping)
 
     def _split_message(self, header, body):
         """Splits a message into chunks that fit Discord's character limit."""
@@ -50,9 +50,10 @@ class Notifier:
 
         return chunks
 
-    def _send_discord(self, subject, message_body):
+    def _send_discord(self, subject, message_body, ping=None):
         """Sends a message via Discord webhook with retries."""
-        header = f"**{subject}** (by {self.user_name})"
+        ping_prefix = f"<@{ping}> " if ping else ""
+        header = f"{ping_prefix}**{subject}** (by {self.user_name})"
         full_message = f"{header}\n\n{message_body}"
 
         if len(full_message) <= DISCORD_MAX_LENGTH:

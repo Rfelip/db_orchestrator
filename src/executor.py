@@ -97,7 +97,8 @@ class Executor:
             s_group = step.get('transaction_group', 'None')
             s_mode = step.get('cleanup_mode', 'drop') if step.get('cleanup_target') else ''
             s_cleanup = f" - Cleanup({s_mode}): {step['cleanup_target']}" if step.get('cleanup_target') else ""
-            print(f"[{idx}] {s_type}: {s_name} (Group {s_group}){s_cleanup}")
+            s_desc = f"\n     {step['description']}" if step.get('description') else ""
+            print(f"[{idx}] {s_type}: {s_name} (Group {s_group}){s_cleanup}{s_desc}")
         print("----------------------\n")
 
         if self.dry_run:
@@ -186,9 +187,11 @@ class Executor:
                     self.yaml_manager.disable_step(step_name)
                     
                     if step.get('notify') or duration > 5:
+                        desc = f"\n{step['description']}" if step.get('description') else ""
                         self.notifier.send_alert(
-                            "Step Completed", 
-                            f"Step '{step_name}' completed in {duration:.2f}s."
+                            "Step Completed",
+                            f"Step '{step_name}' completed in {duration:.2f}s.{desc}",
+                            ping=step.get('ping_on_end')
                         )
 
                 except Exception as e:
@@ -196,7 +199,11 @@ class Executor:
                     log.error(f"Error in step '{step_name}': {e}")
                     if current_session:
                         current_session.rollback()
-                    self.notifier.send_alert("Step Failed", f"Step '{step_name}' failed: {e}")
+                    self.notifier.send_alert(
+                        "Step Failed",
+                        f"Step '{step_name}' failed: {e}",
+                        ping=step.get('ping_on_error')
+                    )
                     raise 
 
             # Final Commit for any open session
