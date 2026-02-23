@@ -395,21 +395,21 @@ class Executor:
                     raise
 
     def _execute_python_step(self, step):
-        """Handles external Python script execution."""
+        """Handles external Python script execution.
+
+        Manifest params are forwarded as --key value CLI arguments,
+        so any python step can use argparse to receive them.
+        """
         file_path = Path(step['file'])
         if not file_path.exists():
             raise FileNotFoundError(f"Python script not found: {file_path}")
 
         log.info(f"Executing Python script: {file_path}")
 
-        # We run the script. It needs to be standalone.
-        # Check if we need to pass params? Design doc doesn't specify passing params to python scripts via CLI,
-        # but usually they might need env vars or args.
-        # For now, run as is.
-
         try:
-            # Using current python executable
             cmd = [sys.executable, str(file_path)]
+            for key, value in step.get('params', {}).items():
+                cmd.extend([f"--{key}", str(value)])
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             log.info(f"Script output: {result.stdout}")
         except subprocess.CalledProcessError as e:
