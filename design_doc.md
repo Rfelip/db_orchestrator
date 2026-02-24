@@ -7,7 +7,7 @@ The **Database Task Orchestrator** is a CLI-based Python application designed to
 *   **Sequential Execution:** Run tasks in a strict order defined by a YAML manifest.
 *   **State Persistence:** Automatically disable tasks in the YAML file upon successful completion.
 *   **Reliability:** Implements transaction grouping, rollback capabilities, and retry logic with exponential backoff.
-*   **Observability:** Provides real-time granular Telegram notifications and detailed local logging.
+*   **Observability:** Provides real-time granular Discord notifications and detailed local logging.
 
 ---
 
@@ -18,7 +18,7 @@ The **Database Task Orchestrator** is a CLI-based Python application designed to
 db_orchestrator/
 │
 ├── config/
-│   ├── .env                 # Secrets (DB Creds, Telegram Token)
+│   ├── .env                 # Secrets (DB Creds, Discord Webhook)
 │   ├── settings.py          # Configuration loader
 │   └── logging_config.py    # Log format definitions
 │
@@ -34,7 +34,7 @@ db_orchestrator/
 │   ├── database.py          # Connection & Transaction Manager
 │   ├── executor.py          # Main Orchestration Logic
 │   ├── parser.py            # SQL Parsing (splitting by delimiter)
-│   ├── notifier.py          # Telegram integration
+│   ├── notifier.py          # Discord webhook notifications
 │   ├── yaml_manager.py      # State updating (ruamel.yaml)
 │   └── utils.py             # Templating (Jinja2) & Helpers
 │
@@ -57,15 +57,15 @@ db_orchestrator/
 ### 3.1 The `.env` File
 Stores sensitive connection details.
 ```ini
-DB_DIALECT=oracle+cx_oracle  # or postgresql+psycopg2
-DB_HOST=localhost
+DB_DIALECT=oracle+oracledb     # or postgresql+psycopg2
+DB_HOST=your_host
 DB_PORT=1521
-DB_USER=admin
-DB_PASS=secret
-DB_SERVICE=ORCL
+DB_USER=your_db_user
+DB_PASS=your_db_password
+DB_SERVICE=your_service_name
 
-TELEGRAM_BOT_TOKEN=123:ABC...
-TELEGRAM_CHAT_ID=987654...
+DISCORD_WEBHOOK_URL=           # Optional — leave empty to disable notifications
+USER_NAME=your_name
 ```
 
 ### 3.2 The Manifest (`manifest.yaml`)
@@ -78,7 +78,7 @@ The source of truth for execution order.
     *   **transaction_group:** (Optional) Integer. Consecutive SQL steps with the same ID share a transaction.
     *   **cleanup_target:** (Optional) Table name to `DROP` before execution.
     *   **output_file:** (Optional) Relative path to save query output (e.g., `results/report.csv`).
-    *   **notify:** (Optional) Boolean. Force Telegram notification for this step.
+    *   **notify:** (Optional) Boolean. Force Discord notification for this step.
     *   **params:** (Optional) Dictionary of values to inject into Jinja2 templates.
 
 *   **Example:**
@@ -131,12 +131,12 @@ steps:
 
 ### 4.5 Notifier (`src/notifier.py`)
 *   **Logic:**
-    *   `send_message(msg)`: Sends to Telegram API.
+    *   `send_alert(subject, message_body)`: Sends to Discord via webhook.
     *   **Granularity:**
-        *   **Info:** Sent on script start ("🚀 Job Started").
+        *   **Info:** Sent on script start ("Job Started").
         *   **Step Success:** Sent if `notify: true` OR execution time > threshold (e.g., 5s). Includes step name and duration.
         *   **Error:** Sent immediately on failure with exception details.
-        *   **Summary:** Sent at the end of execution ("✅ 4 Tasks Completed").
+        *   **Summary:** Sent at the end of execution ("Job Finished").
 
 ---
 
@@ -193,16 +193,16 @@ Here is the updated section of the System Design Document. I have updated **Sect
             *   **Retry Loop:**
                 *   Try Execute.
                 *   On Error: Wait `2^retries` seconds. Retry (Max 3 times).
-                *   On Fatal Error: **ROLLBACK** transaction, Log, Alert Telegram, Exit.
+                *   On Fatal Error: **ROLLBACK** transaction, Log, Alert Discord, Exit.
         5.  **Process (Python):**
             *   Commit any pending SQL transaction (Python scripts break transactions).
             *   Run Script via `subprocess`.
             *   On Error: Alert, Exit.
         6.  **Post-Process:**
             *   Call `yaml_manager.disable_step(step.name)`.
-            *   Send Telegram Notification (if eligible).
+            *   Send Discord Notification (if eligible).
 
 5.  **Finalization:**
     *   Commit remaining open transactions.
     *   Close Connection.
-    *   Send "Job Finished" Telegram summary.
+    *   Send "Job Finished" Discord summary.

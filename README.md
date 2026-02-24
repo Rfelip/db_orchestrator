@@ -28,14 +28,15 @@ All config lives in `config/.env`. Required variables:
 ### Database
 
 ```ini
-DB_DIALECT=oracle+oracledb      # or postgresql+psycopg2
-DB_HOST=localhost
+DB_DIALECT=oracle+oracledb        # or postgresql+psycopg2
+DB_HOST=your_host
 DB_PORT=1521
-DB_USER=admin
-DB_PASS=secret
-DB_SERVICE=ORCL                  # Oracle only
-DB_DATABASE=mydb                 # PostgreSQL only
-USE_DIAGNOSTICS_PACK=true        # Oracle AWR/ASH profiling (optional)
+DB_USER=your_db_user
+DB_PASS=your_db_password
+DB_SERVICE=your_service_name       # Oracle only
+DB_DATABASE=your_database_name     # PostgreSQL only
+USE_DIAGNOSTICS_PACK=true          # Oracle AWR/ASH profiling (optional)
+ORACLE_CLIENT_DIR=                 # Path to Oracle Instant Client (optional)
 ```
 
 ### Notifications (Discord)

@@ -1,3 +1,4 @@
+import os
 import logging
 import sqlalchemy
 from sqlalchemy import create_engine, text
@@ -30,11 +31,14 @@ class DatabaseManager:
             if 'oracle' in self.db_url:
                 try:
                     import oracledb
-                    # Attempt to init thick mode if path exists, otherwise let it default or fail later
-                    lib_dir = r"C:\instantclient_23_8"
+                    lib_dir = os.environ.get('ORACLE_CLIENT_DIR')
                     try:
-                        oracledb.init_oracle_client(lib_dir=lib_dir)
-                        log.info(f"Initialized Oracle Instant Client from {lib_dir}")
+                        if lib_dir:
+                            oracledb.init_oracle_client(lib_dir=lib_dir)
+                            log.info(f"Initialized Oracle Instant Client from {lib_dir}")
+                        else:
+                            oracledb.init_oracle_client()
+                            log.info("Initialized Oracle Instant Client from default location")
                     except oracledb.DatabaseError as e:
                         # Error if already initialized or path invalid
                         log.warning(f"Oracle client init warning (might be already init): {e}")
