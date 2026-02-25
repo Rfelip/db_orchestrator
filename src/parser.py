@@ -7,15 +7,15 @@ class SQLParser:
     """
     Handles reading of SQL files.
     """
-    
+
     @staticmethod
     def read_sql_file(file_path):
         """
         Reads the content of an SQL file.
-        
+
         Args:
             file_path (str or Path): Path to the SQL file.
-            
+
         Returns:
             str: The content of the file.
         """
@@ -23,7 +23,7 @@ class SQLParser:
         if not path.exists():
             log.error(f"SQL file not found: {path}")
             raise FileNotFoundError(f"SQL file not found: {path}")
-            
+
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return f.read()

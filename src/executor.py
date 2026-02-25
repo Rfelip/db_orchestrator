@@ -242,6 +242,8 @@ class Executor:
 
                 if step_type in ['sql', 'plsql']:
                     self._execute_sql_step(step, db_manager, current_session)
+                elif step_type == 'bulk_insert':
+                    self._execute_bulk_insert_step(step, db_manager, current_session)
                 elif step_type == 'python':
                     # Python scripts break transactions. Commit current.
                     if current_session:
@@ -393,6 +395,31 @@ class Executor:
                 else:
                     log.error(f"Step '{step['name']}' failed after {retries} retries.")
                     raise
+
+    def _execute_bulk_insert_step(self, step, db_manager, session):
+        """
+        Handles bulk_insert steps: files containing multiple SQL statements
+        separated by semicolons (e.g. CREATE TABLE + INSERT rows).
+
+        Splits on ';', strips each fragment, skips empties, and executes
+        each statement individually within the current session/transaction.
+        """
+        file_path = Path(step['file'])
+        raw_sql = SQLParser.read_sql_file(file_path)
+
+        params = step.get('params', {})
+        final_sql = render_template(raw_sql, params)
+
+        # Simple split — safe here because bulk_insert files are plain
+        # DML/DDL with no PL/SQL blocks.
+        statements = [s.strip() for s in final_sql.split(';') if s.strip()]
+
+        log.info(f"bulk_insert: {file_path.name} — {len(statements)} statements")
+
+        for idx, stmt in enumerate(statements):
+            db_manager.execute_query(stmt, session=session)
+
+        log.info(f"bulk_insert: {file_path.name} — all {len(statements)} statements executed")
 
     def _execute_python_step(self, step):
         """Handles external Python script execution.
