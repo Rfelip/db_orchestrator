@@ -86,40 +86,37 @@ class DatabaseManager:
 
     def drop_table(self, table_name, session):
         """
-        Safely drops a table if it exists. 
-        Checks metadata first to avoid blindly running DROP.
+        Safely drops a table if it exists.
+        Uses DROP IF EXISTS pattern — tries to drop and ignores ORA-00942 (not found).
 
         Args:
             table_name (str): Name of the table to drop.
             session (Session): Active DB session.
         """
-        try:
-            # We use the engine's dialect to check for table existence
-            # This is safer and more portable than querying system views manually
-            inspector = sqlalchemy.inspect(self.engine)
-            
-            # Note: For Oracle, table names are usually uppercase in metadata
-            # For Postgres, they are lowercase unless quoted.
-            # We will check assuming the user provided the correct case, 
-            # but for Oracle we might want to upper() it if not found.
-            
-            exists = inspector.has_table(table_name)
-            
-            # Simple fallback for Oracle case insensitivity if needed
-            if not exists and self.engine.dialect.name == 'oracle':
-                 exists = inspector.has_table(table_name.upper())
-                 if exists:
-                     table_name = table_name.upper()
+        # Oracle doesn't support DROP TABLE IF EXISTS, so we try and catch.
+        # The inspector approach is unreliable with Oracle case sensitivity and schema caching.
+        names_to_try = [table_name]
+        if self.engine.dialect.name == 'oracle' and table_name != table_name.upper():
+            names_to_try.append(table_name.upper())
 
-            if exists:
-                log.info(f"Dropping table: {table_name}")
-                self.execute_query(f"DROP TABLE {table_name}", session=session)
-            else:
-                log.info(f"Table {table_name} not found. Skipping cleanup.")
+        for name in names_to_try:
+            try:
+                log.info(f"Attempting to drop table: {name}")
+                self.execute_query(f"DROP TABLE {name}", session=session)
+                log.info(f"Dropped table: {name}")
+                return
+            except Exception as e:
+                err_str = str(e)
+                # ORA-00942: table or view does not exist — safe to ignore
+                if "ORA-00942" in err_str:
+                    log.info(f"Table {name} not found. Skipping cleanup.")
+                    session.rollback()
+                    continue
+                else:
+                    log.error(f"Failed to drop table {name}: {e}")
+                    raise
 
-        except Exception as e:
-            log.error(f"Failed to drop table {table_name}: {e}")
-            raise
+        log.info(f"Table {table_name} not found in any case variant. Skipping cleanup.")
 
     def truncate_table(self, table_name, session):
         """
