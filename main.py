@@ -10,6 +10,7 @@ from datetime import datetime
 
 from config.settings import load_settings
 from config.logging_config import setup_logging
+from src.executor import Executor
 
 JOBS_DIR = Path(__file__).parent.parent.parent / "jobs"
 
