@@ -1,4 +1,6 @@
 import argparse
+import csv
+import re
 import sys
 import os
 import json
@@ -11,8 +13,89 @@ from datetime import datetime
 from config.settings import load_settings
 from config.logging_config import setup_logging
 from src.executor import Executor
+from src.database import DatabaseManager
 
 JOBS_DIR = Path(__file__).parent.parent.parent / "jobs"
+
+# DQL-only guard: reject anything that modifies data or schema
+_FORBIDDEN_PATTERNS = re.compile(
+    r'^\s*(CREATE|DROP|ALTER|TRUNCATE|INSERT|UPDATE|DELETE|MERGE|GRANT|REVOKE|EXEC|EXECUTE|CALL)\b',
+    re.IGNORECASE | re.MULTILINE
+)
+
+
+def _validate_dql(sql):
+    """Reject non-SELECT queries. Returns (ok, error_msg)."""
+    match = _FORBIDDEN_PATTERNS.search(sql)
+    if match:
+        return False, f"Blocked: '{match.group().strip()}' statements are not allowed in query mode. DQL (SELECT) only."
+    return True, None
+
+
+def _build_db_url(db_config):
+    """Build SQLAlchemy URL from config dict."""
+    dialect = db_config['dialect']
+    user = db_config['user']
+    password = db_config['password']
+    host = db_config['host']
+    port = db_config['port']
+    if 'oracle' in dialect:
+        service = db_config['service']
+        return f"{dialect}://{user}:{password}@{host}:{port}/{service}"
+    else:
+        database = db_config['database']
+        return f"{dialect}://{user}:{password}@{host}:{port}/{database}"
+
+
+def _run_query(sql, db_config, output_file=None, limit=None):
+    """Execute a DQL query and write results to CSV (stdout or file)."""
+    log = logging.getLogger(__name__)
+
+    # Validate DQL
+    ok, err = _validate_dql(sql)
+    if not ok:
+        print(f"ERROR: {err}", file=sys.stderr)
+        sys.exit(1)
+
+    # Apply row limit if requested (wrap in subquery)
+    if limit:
+        sql = f"SELECT * FROM ({sql}) WHERE ROWNUM <= {int(limit)}"
+
+    db_url = _build_db_url(db_config)
+    db = DatabaseManager(db_url)
+    session = db.get_session()
+
+    try:
+        log.info(f"Executing query ({len(sql)} chars)...")
+        result = db.execute_query(sql, session=session)
+        columns = list(result.keys())
+        rows = result.fetchall()
+        log.info(f"Query returned {len(rows)} rows, {len(columns)} columns.")
+
+        # Write CSV
+        if output_file:
+            out = open(output_file, 'w', newline='', encoding='utf-8')
+        else:
+            out = sys.stdout
+
+        writer = csv.writer(out)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow(row)
+
+        if output_file:
+            out.close()
+            print(f"Wrote {len(rows)} rows to {output_file}", file=sys.stderr)
+        else:
+            print(f"-- {len(rows)} rows returned", file=sys.stderr)
+
+    except Exception as e:
+        log.error(f"Query failed: {e}")
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        session.close()
+        db.close()
 
 
 def _spawn_background(args_list):
@@ -194,6 +277,28 @@ def main():
         help="Kill the latest running background job."
     )
 
+    # Query mode (DQL only — no manifests needed)
+    parser.add_argument(
+        "--query", "-q",
+        type=str,
+        help="Execute a SELECT query directly (DQL only, no CREATE/DROP/INSERT)."
+    )
+    parser.add_argument(
+        "--sql-file", "-f",
+        type=str,
+        help="Execute a SELECT query from a .sql file (DQL only)."
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        help="Output file for query results (CSV). Default: stdout."
+    )
+    parser.add_argument(
+        "--limit", "-l",
+        type=int,
+        help="Limit number of rows returned (wraps query in ROWNUM)."
+    )
+
     args = parser.parse_args()
 
     # Handle status/kill before anything else
@@ -226,6 +331,27 @@ def main():
     except Exception as e:
         log.critical(f"Failed to load configuration: {e}")
         sys.exit(1)
+
+    # 3.5. Query mode — DQL only, no manifest needed
+    if args.query or args.sql_file:
+        if args.query and args.sql_file:
+            print("ERROR: Use --query or --sql-file, not both.", file=sys.stderr)
+            sys.exit(1)
+
+        if args.query:
+            sql = args.query
+        else:
+            sql_path = Path(args.sql_file)
+            if not sql_path.exists():
+                print(f"ERROR: SQL file not found: {sql_path}", file=sys.stderr)
+                sys.exit(1)
+            sql = sql_path.read_text(encoding='utf-8').strip()
+            # Strip trailing semicolons (ORA-00911)
+            if sql.endswith(';'):
+                sql = sql[:-1].strip()
+
+        _run_query(sql, db_config, output_file=args.output, limit=args.limit)
+        return
 
     # 4. Initialize and Run Executor
     manifest_path = Path(args.manifest)
