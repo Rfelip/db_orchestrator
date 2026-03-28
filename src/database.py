@@ -102,7 +102,9 @@ class DatabaseManager:
         for name in names_to_try:
             try:
                 log.info(f"Attempting to drop table: {name}")
-                self.execute_query(f"DROP TABLE {name}", session=session)
+                # Use IF EXISTS for PostgreSQL/others; Oracle doesn't support it
+                drop_sql = f"DROP TABLE IF EXISTS {name}" if 'oracle' not in self.db_url else f"DROP TABLE {name}"
+                self.execute_query(drop_sql, session=session)
                 log.info(f"Dropped table: {name}")
                 return
             except Exception as e:

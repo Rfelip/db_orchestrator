@@ -56,9 +56,11 @@ class Executor:
         # Construct DB URL.
         # Format: dialect://user:pass@host:port/service
         # Note: This is a basic construction.
+        # Use 'database' for PG, 'service' for Oracle
+        db_name = db_config.get('database') or db_config.get('service')
         self.db_url = (
             f"{db_config['dialect']}://{db_config['user']}:{db_config['password']}@"
-            f"{db_config['host']}:{db_config['port']}/{db_config['service']}"
+            f"{db_config['host']}:{db_config['port']}/{db_name}"
         )
 
     def run(self):
@@ -145,6 +147,7 @@ class Executor:
 
         try:
             db_manager = DatabaseManager(self.db_url)
+            SQLParser.set_dialect(self.db_config.get('dialect', ''))
             executed_steps = self._run_steps(
                 execution_queue, db_manager, self.yaml_manager, notify=True
             )
@@ -179,6 +182,12 @@ class Executor:
                 f"**Executed tasks:**\n{steps_summary if steps_summary else 'None'}"
             )
 
+            # Extract clean error for the summary too
+            err_str = str(e)
+            pg_match = re.search(r'\(psycopg2\.errors\.\w+\)\s*(.+?)(?:\n|$)', err_str)
+            clean_err = pg_match.group(1).strip() if pg_match else err_str[:500]
+            failed_step = getattr(e, 'failed_step', 'unknown')
+            summary += f"\n\n**Failed at:** `{failed_step}`\n**Error:** {clean_err}"
             self.notifier.send_alert("Job Failed", summary)
             sys.exit(1)
         finally:
@@ -287,9 +296,22 @@ class Executor:
                     current_session.close()
                     current_session = None
                 if notify:
+                    # Extract clean error from SQLAlchemy wrapper
+                    err_msg = str(e)
+                    # Pull out the actual PG error (e.g. "relation X does not exist")
+                    pg_match = re.search(r'\(psycopg2\.errors\.\w+\)\s*(.+?)(?:
+|$)', err_msg)
+                    if pg_match:
+                        clean_err = pg_match.group(1).strip()
+                    else:
+                        pg_match2 = re.search(r'psycopg2\.\w+\)\s*(.+?)(?:
+|$)', err_msg)
+                        clean_err = pg_match2.group(1).strip() if pg_match2 else err_msg[:300]
+                    # Get the SQL file being executed
+                    sql_file = step.get('file', 'unknown')
                     self.notifier.send_alert(
                         "Step Failed",
-                        f"Step '{step_name}' failed: {e}",
+                        f"**Step:** `{step_name}`\n**File:** `{sql_file}`\n**Error:** {clean_err}",
                         ping=step.get('ping_on_error')
                     )
                 # Preserve the most granular failed step name
@@ -340,7 +362,7 @@ class Executor:
             use_diagnostics = self.db_config.get('use_diagnostics_pack', True)
             profiler = OracleMonitorProfiler(session, use_diagnostics_pack=use_diagnostics)
         elif 'postgres' in dialect:
-            profiler = PostgresExplainProfiler()
+            profiler = None  # DISABLED: PostgresExplainProfiler wraps DDL in EXPLAIN
 
         if profiler:
             final_sql = profiler.prepare_query(final_sql)

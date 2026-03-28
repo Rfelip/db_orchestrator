@@ -59,7 +59,11 @@ def _run_query(sql, db_config, output_file=None, limit=None):
 
     # Apply row limit if requested (wrap in subquery)
     if limit:
-        sql = f"SELECT * FROM ({sql}) WHERE ROWNUM <= {int(limit)}"
+        # ROWNUM is Oracle-only; use LIMIT for other dialects
+        if 'oracle' in db_config.get('dialect', ''):
+            sql = f"SELECT * FROM ({sql}) WHERE ROWNUM <= {int(limit)}"
+        else:
+            sql = f"SELECT * FROM ({sql}) sub LIMIT {int(limit)}"
 
     db_url = _build_db_url(db_config)
     db = DatabaseManager(db_url)
