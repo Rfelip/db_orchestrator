@@ -105,19 +105,34 @@ class Executor:
             self.notifier.send_alert("Orchestrator Failure", f"Failed to load manifest: {e}")
             sys.exit(1)
 
-        # 2. Build grouped plan (consecutive steps with same transaction_group collapse into one entry)
+        # 2. Build grouped plan. Two collapsing concepts:
+        #    - joined_group: consecutive steps that will be FUSED into one psql call
+        #      at execution time (preserves DuckDB pipeline opt across phases).
+        #    - transaction_group: consecutive steps that share a SQLAlchemy session
+        #      (legacy Oracle convention).
+        # joined_group takes precedence — those steps appear in the plan as one
+        # JOINED entry. Remaining steps respect transaction_group as before.
         plan_items = []
         i = 0
         while i < len(execution_queue):
             step = execution_queue[i]
-            group = step.get('transaction_group')
+            jg = step.get('joined_group')
+            tg = step.get('transaction_group')
 
-            if group is not None:
+            if jg is not None:
+                joined_steps = []
+                while i < len(execution_queue) and execution_queue[i].get('joined_group') == jg:
+                    joined_steps.append(execution_queue[i])
+                    i += 1
+                plan_items.append(('joined', jg, joined_steps))
+            elif tg is not None:
                 group_steps = []
-                while i < len(execution_queue) and execution_queue[i].get('transaction_group') == group:
+                while (i < len(execution_queue)
+                       and execution_queue[i].get('transaction_group') == tg
+                       and execution_queue[i].get('joined_group') is None):
                     group_steps.append(execution_queue[i])
                     i += 1
-                plan_items.append(('group', group, group_steps))
+                plan_items.append(('group', tg, group_steps))
             else:
                 plan_items.append(('step', None, [step]))
                 i += 1
@@ -125,7 +140,11 @@ class Executor:
         # 3. Print Plan
         print("\n--- Execution Plan ---")
         for idx, (item_type, group_id, steps) in enumerate(plan_items, 1):
-            if item_type == 'group':
+            if item_type == 'joined':
+                descs = [s['description'] for s in steps if s.get('description')]
+                desc = f"\n     {descs[0]}" if descs else ""
+                print(f"[{idx}] JOINED '{group_id}' ({len(steps)} psql steps fused){desc}")
+            elif item_type == 'group':
                 descs = [s['description'] for s in steps if s.get('description')]
                 desc = f"\n     {descs[0]}" if descs else ""
                 print(f"[{idx}] GROUP {group_id} ({len(steps)} steps){desc}")
@@ -225,7 +244,66 @@ class Executor:
         current_session = None
         current_group = None
 
-        for step in execution_queue:
+        # Coalesce consecutive steps with the same joined_group label into a
+        # single fused execution. Currently only `type: psql` joining is
+        # implemented (concatenate rendered SQL with ";" separator, submit as
+        # one psql -f - call). Useful for splitting a megaquery into N readable
+        # phase files without losing DuckDB's pipeline optimization.
+        items = []
+        i = 0
+        while i < len(execution_queue):
+            s = execution_queue[i]
+            jg = s.get('joined_group')
+            if jg is None:
+                items.append(('single', [s]))
+                i += 1
+            else:
+                grp = [s]
+                j = i + 1
+                while j < len(execution_queue) and execution_queue[j].get('joined_group') == jg:
+                    grp.append(execution_queue[j])
+                    j += 1
+                items.append(('joined', grp))
+                i = j
+
+        for item_type, payload in items:
+            if item_type == 'joined':
+                # Sanity check: same step type required.
+                types = {s.get('type') for s in payload}
+                if types != {'psql'}:
+                    raise RuntimeError(
+                        f"joined_group '{payload[0].get('joined_group')}' must contain only "
+                        f"`type: psql` steps. Got types: {sorted(types)}"
+                    )
+                # Joined groups don't share a SQLAlchemy session — psql handles
+                # its own connection per call. Close any open session first.
+                if current_session:
+                    current_session.commit()
+                    current_session.close()
+                    current_session = None
+                    current_group = None
+
+                try:
+                    recs = self._execute_joined_psql_group(payload)
+                    executed_steps.extend(recs)
+                    for s in payload:
+                        yaml_manager.disable_step(s['name'])
+                    if notify:
+                        total = sum(r['duration'] for r in recs)
+                        if total > 5:
+                            self.notifier.send_alert(
+                                "Joined Group Completed",
+                                f"joined_group '{payload[0]['joined_group']}' "
+                                f"({len(payload)} steps) completed in {total:.2f}s.",
+                            )
+                except Exception as e:
+                    if not hasattr(e, 'failed_step'):
+                        # Best-effort: blame the group's first step.
+                        e.failed_step = f"joined_group:{payload[0].get('joined_group')}"
+                    raise
+                continue
+
+            step = payload[0]
             step_name = step.get('name')
             step_type = step.get('type')
             step_group = step.get('transaction_group')
@@ -469,6 +547,95 @@ class Executor:
             db_manager.execute_query(stmt, session=session)
 
         log.info(f"bulk_insert: {file_path.name} — all {len(statements)} statements executed")
+
+    def _execute_joined_psql_group(self, group):
+        """Run consecutive ``psql`` steps that share a ``joined_group`` label as one psql call.
+
+        Renders each step's SQL with its own params, concatenates with a ``;``
+        separator between fragments, and submits the whole thing via
+        ``docker exec ... psql -f -`` over stdin. This preserves DuckDB's
+        pipeline optimization across phases (no intermediate materialization
+        between fragments) while keeping each phase as its own readable file
+        on disk.
+
+        Returns a list of execution records, one per step. The total wall-time
+        is divided evenly across the steps for reporting purposes (the actual
+        time-per-fragment isn't observable from the outside).
+        """
+        if not group:
+            return []
+        joined_label = group[0].get('joined_group')
+
+        fragments = []
+        for step in group:
+            file_path = Path(step['file'])
+            if not file_path.exists():
+                raise FileNotFoundError(f"SQL file not found: {file_path}")
+            raw = SQLParser.read_sql_file(file_path)
+            rendered = render_template(raw, step.get('params', {}))
+            # Strip trailing whitespace + ensure semicolon at end so the next
+            # fragment starts cleanly. Even if a fragment is multi-statement,
+            # the final `;` separator is harmless.
+            rendered = rendered.rstrip().rstrip(';')
+            fragments.append(rendered)
+        full_sql = "\n;\n\n".join(fragments) + "\n;"
+
+        container = self.db_config.get('container_name')
+        if not container:
+            raise RuntimeError(
+                "joined_group requires DB_CONTAINER_NAME to be set"
+                " (the docker container name where psql will run)."
+            )
+        user = self.db_config.get('user') or 'postgres'
+        db = self.db_config.get('database') or 'postgres'
+        sudo = self.db_config.get('docker_sudo', True)
+        docker_prefix = ['sudo', 'docker'] if sudo else ['docker']
+
+        names = [s['name'] for s in group]
+        log.info(
+            f"joined_group '{joined_label}' — fusing {len(group)} psql steps "
+            f"({names[0]} … {names[-1]}, total SQL: {len(full_sql)} bytes)"
+        )
+
+        start = time.time()
+        exec_cmd = docker_prefix + [
+            'exec', '-i', container,
+            'psql', '-U', user, '-d', db,
+            '-v', 'ON_ERROR_STOP=1', '-q',
+            '-f', '-',
+        ]
+        proc = subprocess.run(
+            exec_cmd,
+            input=full_sql.encode('utf-8'),
+            capture_output=True,
+            check=False,
+        )
+        duration = time.time() - start
+
+        if proc.returncode != 0:
+            stderr_text = (proc.stderr or b'').decode('utf-8', errors='replace')
+            tail = '\n'.join(stderr_text.splitlines()[-60:])
+            log.error(f"joined_group '{joined_label}' failed (rc={proc.returncode}):\n{tail}")
+            err = subprocess.CalledProcessError(proc.returncode, exec_cmd, proc.stdout, proc.stderr)
+            raise err
+
+        log.info(f"joined_group '{joined_label}' ok  ({duration:.2f}s)")
+
+        per_step = duration / max(len(group), 1)
+        records = []
+        for step in group:
+            records.append({
+                "name": step['name'],
+                "duration": per_step,
+                "group": step.get('transaction_group'),
+            })
+            self.reporter.add_task_result(
+                task_name=step['name'],
+                db_type='PGDUCKDB',
+                metrics={'duration_ms': per_step * 1000.0, 'parallel_degree': 0},
+                plan_content=f"(part of joined_group '{joined_label}', {len(group)} fragments)",
+            )
+        return records
 
     def _execute_psql_step(self, step):
         """Run a multi-statement SQL file via `docker exec <container> psql -f`.

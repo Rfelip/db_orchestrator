@@ -32,6 +32,88 @@ class TestIsDdl(unittest.TestCase):
     def test_copy_is_ddl(self):
         self.assertTrue(_is_ddl("COPY foo TO '/tmp/x.csv'"))
 
+
+class TestJoinedGroup(unittest.TestCase):
+    """Coverage do joined_group: coalescing + execução fundida via psql."""
+
+    def setUp(self):
+        # Não queremos rodar o construtor real — Executor.__init__ tenta carregar
+        # YAML/notifier/reporter. Crie uma instância "vazia" via __new__.
+        self.executor = Executor.__new__(Executor)
+        self.executor.db_config = {
+            'dialect': 'postgresql+psycopg2',
+            'container_name': 'pgduckdb',
+            'user': 'postgres',
+            'password': 'x',
+            'host': 'localhost',
+            'port': '5434',
+            'database': 'labma',
+            'docker_sudo': True,
+        }
+        self.executor.reporter = MagicMock()
+
+    def test_joined_group_rejects_mixed_types(self):
+        from src.executor import Executor as Exec
+        from unittest.mock import patch as _patch
+        # _execute_joined_psql_group itself doesn't validate types — that's done
+        # by the caller (_run_steps). Test via _run_steps with a stub.
+        steps = [
+            {'name': 'a', 'type': 'psql',   'file': '/tmp/x.sql', 'enabled': True, 'joined_group': 'g1'},
+            {'name': 'b', 'type': 'python', 'file': '/tmp/x.py',  'enabled': True, 'joined_group': 'g1'},
+        ]
+        ym = MagicMock()
+        ym.disable_step = MagicMock()
+        notifier = MagicMock()
+        self.executor.notifier = notifier
+        self.executor.enable_all = True
+        with self.assertRaises(RuntimeError) as ctx:
+            self.executor._run_steps(steps, MagicMock(), ym, notify=False)
+        self.assertIn("must contain only", str(ctx.exception))
+
+    @patch('src.executor.subprocess.run')
+    @patch('src.executor.SQLParser.read_sql_file')
+    def test_joined_group_concatenates_and_calls_once(self, mock_read, mock_run):
+        # Two psql files → one subprocess call.
+        mock_read.side_effect = ["SELECT 1;", "SELECT 2;"]
+        mock_run.return_value = MagicMock(returncode=0, stdout=b'', stderr=b'')
+
+        # File existence check uses Path(...).exists(), patch it via tmp files.
+        with patch('src.executor.Path') as mock_path:
+            instance = MagicMock()
+            instance.exists.return_value = True
+            mock_path.return_value = instance
+
+            group = [
+                {'name': 'phase1', 'type': 'psql', 'file': '/tmp/p1.sql', 'joined_group': 'mq'},
+                {'name': 'phase2', 'type': 'psql', 'file': '/tmp/p2.sql', 'joined_group': 'mq'},
+            ]
+            records = self.executor._execute_joined_psql_group(group)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]['name'], 'phase1')
+        self.assertEqual(records[1]['name'], 'phase2')
+        # Exactly one psql call regardless of number of fragments.
+        self.assertEqual(mock_run.call_count, 1)
+        # The stdin payload contains both fragments separated by ';'.
+        call = mock_run.call_args
+        stdin_payload = call.kwargs['input'].decode('utf-8')
+        self.assertIn("SELECT 1", stdin_payload)
+        self.assertIn("SELECT 2", stdin_payload)
+        self.assertIn(";", stdin_payload)
+
+    @patch('src.executor.subprocess.run')
+    @patch('src.executor.SQLParser.read_sql_file')
+    def test_joined_group_propagates_psql_failure(self, mock_read, mock_run):
+        mock_read.return_value = "SELECT 1;"
+        mock_run.return_value = MagicMock(returncode=1, stdout=b'', stderr=b'oh no')
+
+        with patch('src.executor.Path') as mock_path:
+            mock_path.return_value.exists.return_value = True
+
+            group = [{'name': 'a', 'type': 'psql', 'file': '/tmp/x.sql', 'joined_group': 'g'}]
+            with self.assertRaises(Exception):
+                self.executor._execute_joined_psql_group(group)
+
 class TestExecutor(unittest.TestCase):
     def setUp(self):
         self.manifest_path = "dummy_manifest.yaml"
