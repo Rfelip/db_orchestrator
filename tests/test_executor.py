@@ -2,7 +2,35 @@ import unittest
 from unittest.mock import MagicMock, patch, mock_open
 import sys
 from pathlib import Path
-from src.executor import Executor
+from src.executor import Executor, _is_ddl
+
+
+class TestIsDdl(unittest.TestCase):
+    """Cobertura do helper _is_ddl, usado para decidir se cabe wrap em EXPLAIN."""
+
+    def test_create_table_is_ddl(self):
+        self.assertTrue(_is_ddl("CREATE TABLE foo (a INT)"))
+
+    def test_drop_table_is_ddl(self):
+        self.assertTrue(_is_ddl("DROP TABLE foo"))
+
+    def test_create_with_leading_comment_is_ddl(self):
+        self.assertTrue(_is_ddl("-- comentário\nCREATE TABLE foo (a INT)"))
+
+    def test_select_is_not_ddl(self):
+        self.assertFalse(_is_ddl("SELECT * FROM foo"))
+
+    def test_insert_is_not_ddl(self):
+        self.assertFalse(_is_ddl("INSERT INTO foo VALUES (1)"))
+
+    def test_with_clause_is_not_ddl(self):
+        self.assertFalse(_is_ddl("WITH cte AS (SELECT 1) SELECT * FROM cte"))
+
+    def test_truncate_is_ddl(self):
+        self.assertTrue(_is_ddl("TRUNCATE TABLE foo"))
+
+    def test_copy_is_ddl(self):
+        self.assertTrue(_is_ddl("COPY foo TO '/tmp/x.csv'"))
 
 class TestExecutor(unittest.TestCase):
     def setUp(self):

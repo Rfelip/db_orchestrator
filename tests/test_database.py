@@ -20,6 +20,8 @@ class TestDatabaseManager(unittest.TestCase):
         # Manually override Session factory for easier testing
         self.db_manager.Session = MagicMock(return_value=self.mock_session)
         self.db_manager.engine = self.mock_engine
+        # Default to a non-Oracle dialect so drop_table takes the IF EXISTS path.
+        self.db_manager.engine.dialect.name = 'postgresql'
 
     def test_init(self):
         self.assertEqual(self.db_manager.db_url, self.db_url)
@@ -40,31 +42,23 @@ class TestDatabaseManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db_manager.execute_query("SELECT 1", session=None)
 
-    @patch('src.database.sqlalchemy.inspect')
-    def test_drop_table_exists(self, mock_inspect):
-        mock_inspector = MagicMock()
-        mock_inspect.return_value = mock_inspector
-        mock_inspector.has_table.return_value = True
-        
+    def test_drop_table_postgres_uses_if_exists(self):
+        """On non-Oracle dialects, drop_table emits a single DROP TABLE IF EXISTS
+        and lets the database decide whether to fire."""
         self.db_manager.drop_table("test_table", self.mock_session)
-        
-        # Verify drop was called
-        # execute_query calls session.execute
         self.assertTrue(self.mock_session.execute.called)
-        # We can check the string in the call args if we want to be specific
         args, _ = self.mock_session.execute.call_args
-        self.assertIn("DROP TABLE test_table", str(args[0]))
+        self.assertIn("DROP TABLE IF EXISTS test_table", str(args[0]))
 
-    @patch('src.database.sqlalchemy.inspect')
-    def test_drop_table_not_exists(self, mock_inspect):
-        mock_inspector = MagicMock()
-        mock_inspect.return_value = mock_inspector
-        mock_inspector.has_table.return_value = False
-        
+    def test_drop_table_oracle_no_if_exists(self):
+        """Oracle pre-23c has no IF EXISTS; the manager swallows ORA-00942."""
+        self.db_manager.engine.dialect.name = 'oracle'
         self.db_manager.drop_table("test_table", self.mock_session)
-        
-        # Verify execute was NOT called (for drop)
-        self.assertFalse(self.mock_session.execute.called)
+        self.assertTrue(self.mock_session.execute.called)
+        args, _ = self.mock_session.execute.call_args
+        rendered = str(args[0])
+        self.assertIn("DROP TABLE test_table", rendered)
+        self.assertNotIn("IF EXISTS", rendered)
 
 if __name__ == '__main__':
     unittest.main()

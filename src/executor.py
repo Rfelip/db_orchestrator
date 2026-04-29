@@ -1,5 +1,8 @@
+import os
+import re
 import sys
 import time
+import tempfile
 import logging
 import argparse
 import subprocess
@@ -14,6 +17,17 @@ from src.utils import render_template
 from src.reporter import Reporter
 from src.profiler import OracleMonitorProfiler, PostgresExplainProfiler
 from config.settings import load_settings  # Assuming we implement this or load env here
+
+# DDL detection — these statements can't be wrapped in EXPLAIN ANALYZE.
+_DDL_PATTERN = re.compile(
+    r'^\s*(?:--[^\n]*\n\s*)*(?:CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|COPY|VACUUM|ANALYZE|COMMENT|REFRESH)\b',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _is_ddl(sql: str) -> bool:
+    """Detect whether SQL starts with a DDL/utility statement that can't be EXPLAINed."""
+    return bool(_DDL_PATTERN.match(sql))
 
 # Setup local logger
 log = logging.getLogger(__name__)
@@ -253,6 +267,16 @@ class Executor:
                     self._execute_sql_step(step, db_manager, current_session)
                 elif step_type == 'bulk_insert':
                     self._execute_bulk_insert_step(step, db_manager, current_session)
+                elif step_type == 'psql':
+                    # Multi-statement files routed via `docker exec ... psql -f`.
+                    # Keeps Postgres dollar-quoting (`$q$ ... $q$`) intact and supports
+                    # the pgduckdb pipeline where most SQL files mix DDL+DML.
+                    if current_session:
+                        current_session.commit()
+                        current_session.close()
+                        current_session = None
+                        current_group = None
+                    self._execute_psql_step(step)
                 elif step_type == 'python':
                     # Python scripts break transactions. Commit current.
                     if current_session:
@@ -299,13 +323,11 @@ class Executor:
                     # Extract clean error from SQLAlchemy wrapper
                     err_msg = str(e)
                     # Pull out the actual PG error (e.g. "relation X does not exist")
-                    pg_match = re.search(r'\(psycopg2\.errors\.\w+\)\s*(.+?)(?:
-|$)', err_msg)
+                    pg_match = re.search(r'\(psycopg2\.errors\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
                     if pg_match:
                         clean_err = pg_match.group(1).strip()
                     else:
-                        pg_match2 = re.search(r'psycopg2\.\w+\)\s*(.+?)(?:
-|$)', err_msg)
+                        pg_match2 = re.search(r'psycopg2\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
                         clean_err = pg_match2.group(1).strip() if pg_match2 else err_msg[:300]
                     # Get the SQL file being executed
                     sql_file = step.get('file', 'unknown')
@@ -355,14 +377,19 @@ class Executor:
         params = step.get('params', {})
         final_sql = render_template(raw_sql, params)
 
-        # Initialize Profiler
+        # Initialize Profiler. DDL statements (CREATE/DROP/ALTER/...) can't be
+        # wrapped in EXPLAIN ANALYZE on Postgres, so for those we skip profiling
+        # and let the executor fall back to wall-clock-only timing in the report.
         profiler = None
         dialect = self.db_config.get('dialect', '').lower()
         if 'oracle' in dialect:
             use_diagnostics = self.db_config.get('use_diagnostics_pack', True)
             profiler = OracleMonitorProfiler(session, use_diagnostics_pack=use_diagnostics)
         elif 'postgres' in dialect:
-            profiler = None  # DISABLED: PostgresExplainProfiler wraps DDL in EXPLAIN
+            if not _is_ddl(final_sql):
+                profiler = PostgresExplainProfiler()
+            else:
+                log.info(f"Skipping EXPLAIN profiling for DDL step '{step['name']}'.")
 
         if profiler:
             final_sql = profiler.prepare_query(final_sql)
@@ -442,6 +469,121 @@ class Executor:
             db_manager.execute_query(stmt, session=session)
 
         log.info(f"bulk_insert: {file_path.name} — all {len(statements)} statements executed")
+
+    def _execute_psql_step(self, step):
+        """Run a multi-statement SQL file via `docker exec <container> psql -f`.
+
+        Used by pipelines that target pgduckdb (or any container-hosted Postgres).
+        Preserves Postgres dollar-quoted strings (`$q$ ... $q$`) and keeps each
+        file as one transactional unit at the database level — the orchestrator's
+        ``transaction_group`` is bypassed for ``psql`` steps.
+
+        Profiling: optional. If the manifest sets ``profile: true`` on the step
+        and the rendered SQL is a single SELECT (not DDL), captures the plan via
+        ``EXPLAIN (ANALYZE, BUFFERS, VERBOSE, SETTINGS, FORMAT JSON)`` over the
+        same psql connection and feeds the JSON into ``PostgresExplainProfiler``.
+        """
+        file_path = Path(step['file'])
+        if not file_path.exists():
+            raise FileNotFoundError(f"SQL file not found: {file_path}")
+
+        raw_sql = SQLParser.read_sql_file(file_path)
+        params = step.get('params', {})
+        rendered = render_template(raw_sql, params)
+
+        container = self.db_config.get('container_name')
+        if not container:
+            raise RuntimeError(
+                "psql step requires DB_CONTAINER_NAME to be set in the environment"
+                " (the docker container name where psql will run)."
+            )
+        user = self.db_config.get('user') or 'postgres'
+        db = self.db_config.get('database') or 'postgres'
+        sudo = self.db_config.get('docker_sudo', True)
+
+        log.info(f"psql: {step['name']}  ({file_path.name})")
+
+        docker_prefix = ['sudo', 'docker'] if sudo else ['docker']
+
+        # Stream SQL via stdin to avoid `docker cp` permission issues — when
+        # cp'd, the file inherits the host UID and the container's `postgres`
+        # user can't read mode-0600 tempfiles.
+        start = time.time()
+        exec_cmd = docker_prefix + [
+            'exec', '-i', container,
+            'psql', '-U', user, '-d', db,
+            '-v', 'ON_ERROR_STOP=1', '-q',
+            '-f', '-',  # read SQL from stdin
+        ]
+        proc = subprocess.run(
+            exec_cmd,
+            input=rendered.encode('utf-8'),
+            capture_output=True,
+            check=False,
+        )
+        duration = time.time() - start
+
+        if proc.returncode != 0:
+            stderr_text = (proc.stderr or b'').decode('utf-8', errors='replace')
+            tail = '\n'.join(stderr_text.splitlines()[-40:])
+            log.error(f"psql step failed (rc={proc.returncode}):\n{tail}")
+            err = subprocess.CalledProcessError(proc.returncode, exec_cmd, proc.stdout, proc.stderr)
+            raise err
+
+        log.info(f"psql ok  ({duration:.2f}s)  stdout:{len(proc.stdout)} bytes")
+
+        # Optional profiling.
+        if step.get('profile') and not _is_ddl(rendered):
+            self._capture_psql_profile(step, rendered, container, user, db, sudo, duration)
+        else:
+            self.reporter.add_task_result(
+                task_name=step['name'],
+                db_type='PGDUCKDB',
+                metrics={'duration_ms': duration * 1000.0, 'parallel_degree': 0},
+                plan_content='(profiling disabled for this step)',
+            )
+
+    def _capture_psql_profile(self, step, rendered_sql, container, user, db, sudo, duration_s):
+        """Run `EXPLAIN ANALYZE ... FORMAT JSON` for a profileable SELECT step."""
+        explain_sql = f"EXPLAIN (ANALYZE, BUFFERS, VERBOSE, SETTINGS, FORMAT JSON) {rendered_sql.rstrip().rstrip(';')}"
+        docker_prefix = ['sudo', 'docker'] if sudo else ['docker']
+        exec_cmd = docker_prefix + [
+            'exec', '-i', container,
+            'psql', '-U', user, '-d', db,
+            '-At', '-v', 'ON_ERROR_STOP=1',
+            '-f', '-',
+        ]
+        proc = subprocess.run(
+            exec_cmd,
+            input=explain_sql.encode('utf-8'),
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            stderr_text = (proc.stderr or b'').decode('utf-8', errors='replace')
+            log.warning(f"EXPLAIN failed for {step['name']}: {stderr_text[:300]}")
+            return
+
+        import json as _json
+        try:
+            plan_json = _json.loads(proc.stdout.decode('utf-8'))
+        except Exception as e:
+            log.warning(f"Could not parse EXPLAIN JSON for {step['name']}: {e}")
+            return
+
+        profiler = PostgresExplainProfiler()
+        profiler.raw_plan_json = plan_json
+        if isinstance(plan_json, list) and plan_json:
+            root = plan_json[0]
+            profiler._analyze_plan_node(root.get('Plan', {}))
+            profiler.metrics['duration_ms'] = root.get('Execution Time', duration_s * 1000.0)
+
+        self.reporter.add_task_result(
+            task_name=step['name'],
+            db_type='PGDUCKDB',
+            metrics=profiler.get_metrics(),
+            plan_content=profiler.get_plan_content(),
+        )
 
     def _execute_python_step(self, step):
         """Handles external Python script execution.

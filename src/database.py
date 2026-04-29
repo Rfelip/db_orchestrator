@@ -87,38 +87,44 @@ class DatabaseManager:
     def drop_table(self, table_name, session):
         """
         Safely drops a table if it exists.
-        Uses DROP IF EXISTS pattern — tries to drop and ignores ORA-00942 (not found).
+
+        Backend behavior:
+            - Oracle: tries `DROP TABLE name` then `DROP TABLE NAME` (uppercase),
+              swallowing ORA-00942 (not found). Pre-23c Oracle has no IF EXISTS.
+            - Anything else (Postgres, pgduckdb, …): single `DROP TABLE IF EXISTS`.
 
         Args:
             table_name (str): Name of the table to drop.
             session (Session): Active DB session.
         """
-        # Oracle doesn't support DROP TABLE IF EXISTS, so we try and catch.
-        # The inspector approach is unreliable with Oracle case sensitivity and schema caching.
-        names_to_try = [table_name]
-        if self.engine.dialect.name == 'oracle' and table_name != table_name.upper():
-            names_to_try.append(table_name.upper())
+        if self.engine.dialect.name == 'oracle':
+            # Oracle path: emulate IF EXISTS by catching ORA-00942.
+            names_to_try = [table_name]
+            if table_name != table_name.upper():
+                names_to_try.append(table_name.upper())
 
-        for name in names_to_try:
-            try:
-                log.info(f"Attempting to drop table: {name}")
-                # Use IF EXISTS for PostgreSQL/others; Oracle doesn't support it
-                drop_sql = f"DROP TABLE IF EXISTS {name}" if 'oracle' not in self.db_url else f"DROP TABLE {name}"
-                self.execute_query(drop_sql, session=session)
-                log.info(f"Dropped table: {name}")
-                return
-            except Exception as e:
-                err_str = str(e)
-                # ORA-00942: table or view does not exist — safe to ignore
-                if "ORA-00942" in err_str:
-                    log.info(f"Table {name} not found. Skipping cleanup.")
-                    session.rollback()
-                    continue
-                else:
+            for name in names_to_try:
+                try:
+                    log.info(f"Attempting to drop table: {name}")
+                    self.execute_query(f"DROP TABLE {name}", session=session)
+                    log.info(f"Dropped table: {name}")
+                    return
+                except Exception as e:
+                    err_str = str(e)
+                    if "ORA-00942" in err_str:
+                        log.info(f"Table {name} not found. Skipping cleanup.")
+                        session.rollback()
+                        continue
                     log.error(f"Failed to drop table {name}: {e}")
                     raise
 
-        log.info(f"Table {table_name} not found in any case variant. Skipping cleanup.")
+            log.info(f"Table {table_name} not found in any case variant. Skipping cleanup.")
+            return
+
+        # Non-Oracle path: native IF EXISTS.
+        log.info(f"Dropping table (if exists): {table_name}")
+        self.execute_query(f"DROP TABLE IF EXISTS {table_name}", session=session)
+        log.info(f"Dropped: {table_name}")
 
     def truncate_table(self, table_name, session):
         """

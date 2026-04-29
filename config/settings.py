@@ -1,5 +1,5 @@
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 import logging
 
 log = logging.getLogger(__name__)
@@ -8,8 +8,12 @@ def load_settings():
     """
     Loads configuration settings from environment variables,
     prioritizing .env file if present.
+
+    Looks for .env starting from the current working directory and walking up.
+    This lets pipelines living in a sibling repo (e.g. scripts_tabua) keep their
+    own `.env` next to the manifests, rather than inside the orchestrator.
     """
-    load_dotenv()  # This loads variables from .env file into the environment
+    load_dotenv(find_dotenv(usecwd=True))
 
     db_config = {
         'dialect': os.getenv('DB_DIALECT'),
@@ -17,9 +21,14 @@ def load_settings():
         'port': os.getenv('DB_PORT'),
         'user': os.getenv('DB_USER'),
         'password': os.getenv('DB_PASS'),
-        'service': os.getenv('DB_SERVICE'), # For Oracle
-        'database': os.getenv('DB_DATABASE'), # For PostgreSQL
-        'use_diagnostics_pack': os.getenv('USE_DIAGNOSTICS_PACK', 'true').lower() == 'true'
+        'service': os.getenv('DB_SERVICE'),       # For Oracle
+        'database': os.getenv('DB_DATABASE'),     # For PostgreSQL / pgduckdb
+        'use_diagnostics_pack': os.getenv('USE_DIAGNOSTICS_PACK', 'true').lower() == 'true',
+        # pgduckdb / containerized Postgres support — used by the `psql` step type.
+        # `container_name` is the name of the docker container running Postgres;
+        # `docker_sudo` controls whether we prefix `sudo` (rootful docker installs).
+        'container_name': os.getenv('DB_CONTAINER_NAME'),
+        'docker_sudo': os.getenv('DB_DOCKER_SUDO', 'true').lower() == 'true',
     }
 
     # Validate essential DB settings
