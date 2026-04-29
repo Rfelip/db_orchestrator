@@ -12,8 +12,11 @@ def load_settings():
     Looks for .env starting from the current working directory and walking up.
     This lets pipelines living in a sibling repo (e.g. scripts_tabua) keep their
     own `.env` next to the manifests, rather than inside the orchestrator.
+
+    `override=True` so that values in .env beat any stale environment variables
+    that may be left over from a previous shell session.
     """
-    load_dotenv(find_dotenv(usecwd=True))
+    load_dotenv(find_dotenv(usecwd=True), override=True)
 
     db_config = {
         'dialect': os.getenv('DB_DIALECT'),
