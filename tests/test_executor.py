@@ -131,7 +131,7 @@ class TestExecutor(unittest.TestCase):
         }
 
     @patch('src.executor.YamlManager')
-    @patch('src.executor.Notifier')
+    @patch('src.executor.build_notifier')
     @patch('src.executor.DatabaseManager')
     @patch('src.executor.Reporter')
     def test_init(self, MockReporter, MockDB, MockNotifier, MockYaml):
@@ -142,7 +142,7 @@ class TestExecutor(unittest.TestCase):
         MockReporter.assert_called()
 
     @patch('src.executor.YamlManager')
-    @patch('src.executor.Notifier')
+    @patch('src.executor.build_notifier')
     @patch('src.executor.DatabaseManager')
     @patch('src.executor.Reporter')
     def test_run_no_steps(self, MockReporter, MockDB, MockNotifier, MockYaml):
@@ -157,7 +157,7 @@ class TestExecutor(unittest.TestCase):
         MockDB.assert_not_called()
 
     @patch('src.executor.YamlManager')
-    @patch('src.executor.Notifier')
+    @patch('src.executor.build_notifier')
     @patch('src.executor.DatabaseManager')
     @patch('builtins.input', return_value='y')
     @patch('src.executor.SQLParser')
@@ -211,7 +211,7 @@ class TestExecutor(unittest.TestCase):
         mock_yaml_instance.disable_step.assert_called_with('Test SQL')
         
     @patch('src.executor.YamlManager')
-    @patch('src.executor.Notifier')
+    @patch('src.executor.build_notifier')
     @patch('src.executor.DatabaseManager')
     @patch('builtins.input', return_value='n')
     @patch('src.executor.Reporter')
@@ -228,7 +228,7 @@ class TestExecutor(unittest.TestCase):
         MockDB.assert_not_called()
 
     @patch('src.executor.YamlManager')
-    @patch('src.executor.Notifier')
+    @patch('src.executor.build_notifier')
     @patch('src.executor.DatabaseManager')
     @patch('builtins.input', return_value='y')
     @patch('src.executor.subprocess.run')

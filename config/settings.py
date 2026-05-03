@@ -52,12 +52,15 @@ def load_settings():
         raise ValueError("DB_DATABASE is required for PostgreSQL dialect.")
 
     notifier_config = {
-        'webhook_url': os.getenv('DISCORD_WEBHOOK_URL'),
-        'user_name': os.getenv('USER_NAME', 'Unknown')
+        'discord_webhook_url': os.getenv('DISCORD_WEBHOOK_URL'),
+        'telegram_bot_token': os.getenv('TELEGRAM_BOT_TOKEN'),
+        'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID'),
+        'user_name': os.getenv('USER_NAME', 'Unknown'),
     }
-
-    if not notifier_config['webhook_url']:
-        log.warning("DISCORD_WEBHOOK_URL not set. Discord notifications will be disabled.")
+    # Notifier fan-out is decided in src/notifier.py:build_notifier — this
+    # struct just carries whatever env supplied. Channels with empty config
+    # are skipped silently; the orchestrator never crashes for missing
+    # notification credentials.
 
     return {
         'db': db_config,
@@ -70,6 +73,9 @@ if __name__ == "__main__":
         settings = load_settings()
         print("Loaded Settings:")
         print(f"DB Dialect: {settings['db']['dialect']}")
-        print(f"Discord Webhook: {'Configured' if settings['notifier']['webhook_url'] else 'N/A'}")
+        n = settings['notifier']
+        print(f"Discord Webhook: {'Configured' if n.get('discord_webhook_url') else 'N/A'}")
+        tg_ok = bool(n.get('telegram_bot_token') and n.get('telegram_chat_id'))
+        print(f"Telegram: {'Configured' if tg_ok else 'N/A'}")
     except ValueError as e:
         print(f"Error loading settings: {e}")

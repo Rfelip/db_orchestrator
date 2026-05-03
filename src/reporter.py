@@ -1,8 +1,9 @@
 import json
 import logging
-import shutil
 from pathlib import Path
 from datetime import datetime
+
+import jinja2
 from jinja2 import Environment, FileSystemLoader
 
 log = logging.getLogger(__name__)
@@ -17,23 +18,47 @@ class Reporter:
         self.report_dir.mkdir(parents=True, exist_ok=True)
         self.plans_dir = self.report_dir / 'plans'
         self.plans_dir.mkdir(exist_ok=True)
+        self.rendered_dir = self.report_dir / 'rendered'
+        self.rendered_dir.mkdir(exist_ok=True)
         self.tasks_data = []
 
-    def add_task_result(self, task_name, db_type, metrics, plan_content):
+    def add_task_result(self, task_name, db_type, metrics, plan_content,
+                        rendered_sql: str | None = None):
         """
         Adds a task's execution results to the report data.
+
+        `rendered_sql` is the SQL that actually ran (after parameter
+        substitution). When supplied it is written alongside the plan
+        as `rendered/NN_<taskname>.sql` so the report directory is
+        self-contained — a reader can reproduce a step from the report
+        alone, without re-rendering the source SQL file with the
+        manifest's params.
         """
         # Save plan to file
         safe_name = "".join(x for x in task_name if x.isalnum() or x in "._- ")
-        plan_filename = f"{len(self.tasks_data) + 1:02d}_{safe_name}.txt"
+        seq = f"{len(self.tasks_data) + 1:02d}"
+        plan_filename = f"{seq}_{safe_name}.txt"
         plan_path = self.plans_dir / plan_filename
-        
+
         try:
             with open(plan_path, 'w', encoding='utf-8') as f:
                 f.write(plan_content)
-        except Exception as e:
+        except OSError as e:
             log.error(f"Failed to save plan for {task_name}: {e}")
             plan_filename = None
+
+        # Save rendered SQL if supplied. Failures here are logged but do
+        # not break the run — the plan is the authoritative artifact.
+        rendered_filename: str | None = None
+        if rendered_sql is not None:
+            rendered_filename = f"{seq}_{safe_name}.sql"
+            rendered_path = self.rendered_dir / rendered_filename
+            try:
+                with open(rendered_path, 'w', encoding='utf-8') as f:
+                    f.write(rendered_sql)
+            except OSError as e:
+                log.error(f"Failed to save rendered SQL for {task_name}: {e}")
+                rendered_filename = None
 
         # Determine Bottleneck
         bottleneck = "Unknown"
@@ -68,7 +93,8 @@ class Reporter:
                 "bottleneck": bottleneck
             },
             "plan_file": f"plans/{plan_filename}" if plan_filename else None,
-            "plan_content": plan_content  # For HTML embedding
+            "rendered_sql_file": f"rendered/{rendered_filename}" if rendered_filename else None,
+            "plan_content": plan_content,  # For HTML embedding
         }
         
         self.tasks_data.append(task_entry)
@@ -91,7 +117,7 @@ class Reporter:
         try:
             with open(self.report_dir / 'summary.json', 'w', encoding='utf-8') as f:
                 json.dump(summary, f, indent=2)
-        except Exception as e:
+        except OSError as e:
             log.error(f"Failed to write summary.json: {e}")
 
         # Render HTML
@@ -115,6 +141,6 @@ class Reporter:
                 
             log.info(f"Report generated at {self.report_dir / 'report.html'}")
             
-        except Exception as e:
+        except (OSError, jinja2.TemplateError) as e:
             log.error(f"Failed to generate HTML report: {e}")
             raise

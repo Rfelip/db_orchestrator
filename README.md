@@ -39,15 +39,36 @@ USE_DIAGNOSTICS_PACK=true          # Oracle AWR/ASH profiling (optional)
 ORACLE_CLIENT_DIR=                 # Path to Oracle Instant Client (optional)
 ```
 
-### Notifications (Discord)
+### Notifications (Discord and Telegram)
+
+Both channels are optional and independent. Configure either, both, or
+neither — alerts fan out to whichever are populated.
 
 ```ini
+# Discord (channel webhook)
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
+
+# Telegram (bot token + chat id)
+TELEGRAM_BOT_TOKEN=123456:abcdef...
+TELEGRAM_CHAT_ID=123456789
 ```
 
-To get a webhook URL: Discord channel settings > Integrations > Webhooks > New Webhook > Copy URL.
+- **Discord webhook URL:** Discord channel settings → Integrations →
+  Webhooks → New Webhook → Copy URL.
+- **Telegram bot token:** create a bot via @BotFather; the token looks
+  like `123456:abcdef`.
+- **Telegram chat ID:** message the bot once, then visit
+  `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your chat's
+  `id`. For a personal DM the chat ID equals your Telegram user ID.
 
-Notifications fire on job start/end, step failures, and long-running steps (>5s). If the URL is not set, notifications are silently disabled.
+Alerts fire on job start/end, step failures, and any step that
+exceeds 5s wall-clock or sets `notify: true`. If neither channel is
+configured the orchestrator runs silently with one warning at startup.
+
+Failure alerts include the step name, source SQL file, transaction or
+joined-group label, and a SHA-256 prefix of the source SQL — that
+prefix lets a recipient grep `reports/{ts}/rendered/` directly to find
+the SQL that ran.
 
 ## Project Structure
 

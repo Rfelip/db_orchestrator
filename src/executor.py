@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import sys
@@ -12,7 +13,7 @@ from datetime import datetime
 from src.database import DatabaseManager
 from src.yaml_manager import YamlManager
 from src.parser import SQLParser
-from src.notifier import Notifier
+from src.notifier import build_notifier
 from src.utils import render_template
 from src.reporter import Reporter
 from src.profiler import OracleMonitorProfiler, PostgresExplainProfiler
@@ -56,10 +57,7 @@ class Executor:
         self.enable_all = enable_all
 
         self.yaml_manager = YamlManager(manifest_path)
-        self.notifier = Notifier(
-            webhook_url=notifier_config.get('webhook_url'),
-            user_name=notifier_config.get('user_name', 'Unknown')
-        )
+        self.notifier = build_notifier(notifier_config)
 
         # Initialize Reporter with a timestamped directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -407,11 +405,20 @@ class Executor:
                     else:
                         pg_match2 = re.search(r'psycopg2\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
                         clean_err = pg_match2.group(1).strip() if pg_match2 else err_msg[:300]
-                    # Get the SQL file being executed
+                    # Surface enough context for the recipient to find the
+                    # rendered SQL in the report directory. The sql_hash
+                    # matches the report's per-step prefix so a recipient
+                    # can grep `reports/{ts}/rendered/` directly.
                     sql_file = step.get('file', 'unknown')
+                    group_label = step_group or step.get('joined_group')
+                    group_line = f"\n**Group:** `{group_label}`" if group_label else ""
+                    sql_hash = self._sql_hash_for_step(step)
+                    hash_line = f"\n**SQL hash:** `{sql_hash}`" if sql_hash else ""
                     self.notifier.send_alert(
                         "Step Failed",
-                        f"**Step:** `{step_name}`\n**File:** `{sql_file}`\n**Error:** {clean_err}",
+                        f"**Step:** `{step_name}`\n"
+                        f"**File:** `{sql_file}`{group_line}{hash_line}\n"
+                        f"**Error:** {clean_err}",
                         ping=step.get('ping_on_error')
                     )
                 # Preserve the most granular failed step name
@@ -425,6 +432,21 @@ class Executor:
             current_session.close()
 
         return executed_steps
+
+    def _sql_hash_for_step(self, step) -> str | None:
+        """Best-effort SHA-256 prefix of a step's source SQL file.
+
+        Used to enrich failure alerts with a stable identifier the
+        recipient can match against the report's `rendered/NN_*.sql`.
+        Returns None for non-SQL steps or unreadable files."""
+        path = step.get('file')
+        if not path:
+            return None
+        try:
+            content = Path(path).read_bytes()
+        except (FileNotFoundError, OSError):
+            return None
+        return hashlib.sha256(content).hexdigest()[:16]
 
     def _execute_manifest_step(self, step, db_manager):
         """Handles manifest-type step: loads and executes a child manifest."""
@@ -508,7 +530,8 @@ class Executor:
                             task_name=step['name'],
                             db_type=dialect.split('+')[0].upper(),
                             metrics=metrics,
-                            plan_content=plan_content
+                            plan_content=plan_content,
+                            rendered_sql=final_sql,
                         )
                     except Exception as pe:
                         log.error(f"Profiling failed for step '{step['name']}': {pe}")
@@ -648,6 +671,7 @@ class Executor:
                 db_type='PGDUCKDB',
                 metrics={'duration_ms': per_step * 1000.0, 'parallel_degree': 0},
                 plan_content=f"(part of joined_group '{joined_label}', {len(group)} fragments)",
+                rendered_sql=full_sql,
             )
         return records
 
@@ -722,6 +746,7 @@ class Executor:
                 db_type='PGDUCKDB',
                 metrics={'duration_ms': duration * 1000.0, 'parallel_degree': 0},
                 plan_content='(profiling disabled for this step)',
+                rendered_sql=rendered,
             )
 
     def _capture_psql_profile(self, step, rendered_sql, container, user, db, sudo, duration_s):
@@ -764,6 +789,7 @@ class Executor:
             db_type='PGDUCKDB',
             metrics=profiler.get_metrics(),
             plan_content=profiler.get_plan_content(),
+            rendered_sql=rendered_sql,
         )
 
     def _execute_python_step(self, step):
