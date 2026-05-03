@@ -551,20 +551,29 @@ class Executor:
     def _execute_joined_psql_group(self, group):
         """Run consecutive ``psql`` steps that share a ``joined_group`` label as one psql call.
 
-        Renders each step's SQL with its own params, concatenates with a ``;``
-        separator between fragments, and submits the whole thing via
-        ``docker exec ... psql -f -`` over stdin. This preserves DuckDB's
-        pipeline optimization across phases (no intermediate materialization
-        between fragments) while keeping each phase as its own readable file
-        on disk.
+        Two glue modes (set via ``joined_glue`` on the first step of the group):
+
+        * ``statement`` (default) — each fragment is a complete SQL statement.
+          Fragments are concatenated with ``";"`` separator, like a normal
+          multi-statement psql script. Use when each fragment can stand alone
+          (e.g. each one ``COPY ... TO 'parquet'``).
+        * ``raw`` (megazord mode) — fragments are pieces of a single SQL
+          statement that's only valid when assembled. Concatenated with ``"\\n"``
+          only, no semicolons added. Use to split one giant ``WITH ... SELECT``
+          across multiple files for readability while preserving DuckDB's full
+          CTE pipeline (no intermediate materialization).
 
         Returns a list of execution records, one per step. The total wall-time
-        is divided evenly across the steps for reporting purposes (the actual
-        time-per-fragment isn't observable from the outside).
+        is divided evenly across the steps for reporting purposes.
         """
         if not group:
             return []
         joined_label = group[0].get('joined_group')
+        joined_glue = (group[0].get('joined_glue') or 'statement').lower()
+        if joined_glue not in ('statement', 'raw'):
+            raise ValueError(
+                f"joined_glue must be 'statement' or 'raw', got '{joined_glue}'"
+            )
 
         fragments = []
         for step in group:
@@ -573,12 +582,16 @@ class Executor:
                 raise FileNotFoundError(f"SQL file not found: {file_path}")
             raw = SQLParser.read_sql_file(file_path)
             rendered = render_template(raw, step.get('params', {}))
-            # Strip trailing whitespace + ensure semicolon at end so the next
-            # fragment starts cleanly. Even if a fragment is multi-statement,
-            # the final `;` separator is harmless.
-            rendered = rendered.rstrip().rstrip(';')
+            if joined_glue == 'statement':
+                # Each fragment is its own statement; strip trailing `;` so we
+                # can join cleanly and add one big trailing `;` at the end.
+                rendered = rendered.rstrip().rstrip(';')
             fragments.append(rendered)
-        full_sql = "\n;\n\n".join(fragments) + "\n;"
+
+        if joined_glue == 'statement':
+            full_sql = "\n;\n\n".join(fragments) + "\n;"
+        else:  # raw / megazord
+            full_sql = "\n".join(fragments)
 
         container = self.db_config.get('container_name')
         if not container:
@@ -593,8 +606,9 @@ class Executor:
 
         names = [s['name'] for s in group]
         log.info(
-            f"joined_group '{joined_label}' — fusing {len(group)} psql steps "
-            f"({names[0]} … {names[-1]}, total SQL: {len(full_sql)} bytes)"
+            f"joined_group '{joined_label}' (glue={joined_glue}) — fusing "
+            f"{len(group)} psql steps ({names[0]} … {names[-1]}, "
+            f"total SQL: {len(full_sql)} bytes)"
         )
 
         start = time.time()
