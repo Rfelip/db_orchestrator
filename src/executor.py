@@ -84,13 +84,13 @@ class Executor:
         # 1. Load Manifest
         try:
             manifest = self.yaml_manager.load_manifest()
-            all_steps = manifest.get('steps', [])
+            all_steps = manifest.steps
 
             # Filter enabled steps
             if self.enable_all:
                 execution_queue = all_steps
             else:
-                execution_queue = [s for s in all_steps if s.get('enabled', True)]
+                execution_queue = [s for s in all_steps if s.enabled]
 
             log.info(f"Loaded {len(all_steps)} steps. {len(execution_queue)} enabled.")
 
@@ -114,20 +114,20 @@ class Executor:
         i = 0
         while i < len(execution_queue):
             step = execution_queue[i]
-            jg = step.get('joined_group')
-            tg = step.get('transaction_group')
+            jg = step.joined_group
+            tg = step.transaction_group
 
             if jg is not None:
                 joined_steps = []
-                while i < len(execution_queue) and execution_queue[i].get('joined_group') == jg:
+                while i < len(execution_queue) and execution_queue[i].joined_group == jg:
                     joined_steps.append(execution_queue[i])
                     i += 1
                 plan_items.append(('joined', jg, joined_steps))
             elif tg is not None:
                 group_steps = []
                 while (i < len(execution_queue)
-                       and execution_queue[i].get('transaction_group') == tg
-                       and execution_queue[i].get('joined_group') is None):
+                       and execution_queue[i].transaction_group == tg
+                       and execution_queue[i].joined_group is None):
                     group_steps.append(execution_queue[i])
                     i += 1
                 plan_items.append(('group', tg, group_steps))
@@ -139,21 +139,21 @@ class Executor:
         print("\n--- Execution Plan ---")
         for idx, (item_type, group_id, steps) in enumerate(plan_items, 1):
             if item_type == 'joined':
-                descs = [s['description'] for s in steps if s.get('description')]
+                descs = [s.description for s in steps if s.description]
                 desc = f"\n     {descs[0]}" if descs else ""
                 print(f"[{idx}] JOINED '{group_id}' ({len(steps)} psql steps fused){desc}")
             elif item_type == 'group':
-                descs = [s['description'] for s in steps if s.get('description')]
+                descs = [s.description for s in steps if s.description]
                 desc = f"\n     {descs[0]}" if descs else ""
                 print(f"[{idx}] GROUP {group_id} ({len(steps)} steps){desc}")
             else:
                 step = steps[0]
-                s_type = step.get('type', 'UNK').upper()
-                s_name = step.get('name', 'Unnamed')
-                s_mode = step.get('cleanup_mode', 'drop') if step.get('cleanup_target') else ''
-                s_cleanup = f" - Cleanup({s_mode}): {step['cleanup_target']}" if step.get('cleanup_target') else ""
-                s_desc = f"\n     {step['description']}" if step.get('description') else ""
-                print(f"[{idx}] {s_type}: {s_name}{s_cleanup}{s_desc}")
+                s_cleanup = (
+                    f" - Cleanup({step.cleanup_mode}): {step.cleanup_target}"
+                    if step.cleanup_target else ""
+                )
+                s_desc = f"\n     {step.description}" if step.description else ""
+                print(f"[{idx}] {step.type.upper()}: {step.name}{s_cleanup}{s_desc}")
         print(f"--- {len(plan_items)} tasks ({len(execution_queue)} steps) ---\n")
 
         if self.dry_run:
@@ -251,14 +251,14 @@ class Executor:
         i = 0
         while i < len(execution_queue):
             s = execution_queue[i]
-            jg = s.get('joined_group')
+            jg = s.joined_group
             if jg is None:
                 items.append(('single', [s]))
                 i += 1
             else:
                 grp = [s]
                 j = i + 1
-                while j < len(execution_queue) and execution_queue[j].get('joined_group') == jg:
+                while j < len(execution_queue) and execution_queue[j].joined_group == jg:
                     grp.append(execution_queue[j])
                     j += 1
                 items.append(('joined', grp))
@@ -267,10 +267,10 @@ class Executor:
         for item_type, payload in items:
             if item_type == 'joined':
                 # Sanity check: same step type required.
-                types = {s.get('type') for s in payload}
+                types = {s.type for s in payload}
                 if types != {'psql'}:
                     raise RuntimeError(
-                        f"joined_group '{payload[0].get('joined_group')}' must contain only "
+                        f"joined_group '{payload[0].joined_group}' must contain only "
                         f"`type: psql` steps. Got types: {sorted(types)}"
                     )
                 # Joined groups don't share a SQLAlchemy session — psql handles
@@ -285,26 +285,26 @@ class Executor:
                     recs = self._execute_joined_psql_group(payload)
                     executed_steps.extend(recs)
                     for s in payload:
-                        yaml_manager.disable_step(s['name'])
+                        yaml_manager.disable_step(s.name)
                     if notify:
                         total = sum(r['duration'] for r in recs)
                         if total > 5:
                             self.notifier.send_alert(
                                 "Joined Group Completed",
-                                f"joined_group '{payload[0]['joined_group']}' "
+                                f"joined_group '{payload[0].joined_group}' "
                                 f"({len(payload)} steps) completed in {total:.2f}s.",
                             )
                 except Exception as e:
                     if not hasattr(e, 'failed_step'):
                         # Best-effort: blame the group's first step.
-                        e.failed_step = f"joined_group:{payload[0].get('joined_group')}"
+                        e.failed_step = f"joined_group:{payload[0].joined_group}"
                     raise
                 continue
 
             step = payload[0]
-            step_name = step.get('name')
-            step_type = step.get('type')
-            step_group = step.get('transaction_group')
+            step_name = step.name
+            step_type = step.type
+            step_group = step.transaction_group
 
             log.info(f"Processing step: {step_name}")
 
@@ -329,12 +329,12 @@ class Executor:
 
             try:
                 # Pre-flight: Cleanup
-                if step.get('cleanup_target'):
-                    mode = step.get('cleanup_mode', 'drop')
+                if step.cleanup_target:
+                    mode = step.cleanup_mode
                     if mode == 'truncate':
-                        db_manager.truncate_table(step['cleanup_target'], current_session)
+                        db_manager.truncate_table(step.cleanup_target, current_session)
                     else:
-                        db_manager.drop_table(step['cleanup_target'], current_session)
+                        db_manager.drop_table(step.cleanup_target, current_session)
 
                 # Execution
                 start_time = time.time()
@@ -381,12 +381,12 @@ class Executor:
                 # Post-Process
                 yaml_manager.disable_step(step_name)
 
-                if notify and (step.get('notify') or duration > 5):
-                    desc = f"\n{step['description']}" if step.get('description') else ""
+                if notify and (step.notify or duration > 5):
+                    desc = f"\n{step.description}" if step.description else ""
                     self.notifier.send_alert(
                         "Step Completed",
                         f"Step '{step_name}' completed in {duration:.2f}s.{desc}",
-                        ping=step.get('ping_on_end')
+                        ping=step.ping_on_end
                     )
 
             except Exception as e:
@@ -409,8 +409,8 @@ class Executor:
                     # rendered SQL in the report directory. The sql_hash
                     # matches the report's per-step prefix so a recipient
                     # can grep `reports/{ts}/rendered/` directly.
-                    sql_file = step.get('file', 'unknown')
-                    group_label = step_group or step.get('joined_group')
+                    sql_file = step.file or 'unknown'
+                    group_label = step_group or step.joined_group
                     group_line = f"\n**Group:** `{group_label}`" if group_label else ""
                     sql_hash = self._sql_hash_for_step(step)
                     hash_line = f"\n**SQL hash:** `{sql_hash}`" if sql_hash else ""
@@ -419,7 +419,7 @@ class Executor:
                         f"**Step:** `{step_name}`\n"
                         f"**File:** `{sql_file}`{group_line}{hash_line}\n"
                         f"**Error:** {clean_err}",
-                        ping=step.get('ping_on_error')
+                        ping=step.ping_on_error
                     )
                 # Preserve the most granular failed step name
                 if not hasattr(e, 'failed_step'):
@@ -439,7 +439,7 @@ class Executor:
         Used to enrich failure alerts with a stable identifier the
         recipient can match against the report's `rendered/NN_*.sql`.
         Returns None for non-SQL steps or unreadable files."""
-        path = step.get('file')
+        path = step.file
         if not path:
             return None
         try:
@@ -450,18 +450,18 @@ class Executor:
 
     def _execute_manifest_step(self, step, db_manager):
         """Handles manifest-type step: loads and executes a child manifest."""
-        file_path = Path(step['file'])
+        file_path = Path(step.file)
         if not file_path.exists():
             raise FileNotFoundError(f"Child manifest not found: {file_path}")
 
         child_yaml = YamlManager(file_path)
         child_manifest = child_yaml.load_manifest()
-        child_steps = child_manifest.get('steps', [])
+        child_steps = child_manifest.steps
 
         if self.enable_all:
             child_queue = child_steps
         else:
-            child_queue = [s for s in child_steps if s.get('enabled', True)]
+            child_queue = [s for s in child_steps if s.enabled]
 
         log.info(f"Executing child manifest: {file_path} ({len(child_queue)}/{len(child_steps)} steps enabled)")
 
@@ -470,11 +470,11 @@ class Executor:
 
     def _execute_sql_step(self, step, db_manager, session):
         """Handles SQL/PLSQL execution with retries and profiling."""
-        file_path = Path(step['file'])
+        file_path = Path(step.file)
         raw_sql = SQLParser.read_sql_file(file_path)
 
         # Apply Templates
-        params = step.get('params', {})
+        params = step.params
         final_sql = render_template(raw_sql, params)
 
         # Initialize Profiler. DDL statements (CREATE/DROP/ALTER/...) can't be
@@ -489,7 +489,7 @@ class Executor:
             if not _is_ddl(final_sql):
                 profiler = PostgresExplainProfiler()
             else:
-                log.info(f"Skipping EXPLAIN profiling for DDL step '{step['name']}'.")
+                log.info(f"Skipping EXPLAIN profiling for DDL step '{step.name}'.")
 
         if profiler:
             final_sql = profiler.prepare_query(final_sql)
@@ -502,10 +502,10 @@ class Executor:
                 duration_exec = time.time() - start_exec
 
                 # Output handling
-                if step.get('output_file'):
+                if step.output_file:
                     rows = result.fetchall()
                     if rows:
-                        out_path = Path(step['output_file'])
+                        out_path = Path(step.output_file)
                         out_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(out_path, 'w', encoding='utf-8') as f:
                             if result.keys():
@@ -527,23 +527,23 @@ class Executor:
                         plan_content = profiler.get_plan_content()
 
                         self.reporter.add_task_result(
-                            task_name=step['name'],
+                            task_name=step.name,
                             db_type=dialect.split('+')[0].upper(),
                             metrics=metrics,
                             plan_content=plan_content,
                             rendered_sql=final_sql,
                         )
                     except Exception as pe:
-                        log.error(f"Profiling failed for step '{step['name']}': {pe}")
+                        log.error(f"Profiling failed for step '{step.name}': {pe}")
 
                 break # Success
             except Exception as e:
                 if attempt < retries:
                     wait = 5 * 2 ** attempt
-                    log.warning(f"Step '{step['name']}' failed. Retrying in {wait}s... Error: {e}")
+                    log.warning(f"Step '{step.name}' failed. Retrying in {wait}s... Error: {e}")
                     time.sleep(wait)
                 else:
-                    log.error(f"Step '{step['name']}' failed after {retries} retries.")
+                    log.error(f"Step '{step.name}' failed after {retries} retries.")
                     raise
 
     def _execute_bulk_insert_step(self, step, db_manager, session):
@@ -554,10 +554,10 @@ class Executor:
         Splits on ';', strips each fragment, skips empties, and executes
         each statement individually within the current session/transaction.
         """
-        file_path = Path(step['file'])
+        file_path = Path(step.file)
         raw_sql = SQLParser.read_sql_file(file_path)
 
-        params = step.get('params', {})
+        params = step.params
         final_sql = render_template(raw_sql, params)
 
         # Simple split — safe here because bulk_insert files are plain
@@ -591,8 +591,8 @@ class Executor:
         """
         if not group:
             return []
-        joined_label = group[0].get('joined_group')
-        joined_glue = (group[0].get('joined_glue') or 'statement').lower()
+        joined_label = group[0].joined_group
+        joined_glue = (group[0].joined_glue or 'statement').lower()
         if joined_glue not in ('statement', 'raw'):
             raise ValueError(
                 f"joined_glue must be 'statement' or 'raw', got '{joined_glue}'"
@@ -600,11 +600,11 @@ class Executor:
 
         fragments = []
         for step in group:
-            file_path = Path(step['file'])
+            file_path = Path(step.file)
             if not file_path.exists():
                 raise FileNotFoundError(f"SQL file not found: {file_path}")
             raw = SQLParser.read_sql_file(file_path)
-            rendered = render_template(raw, step.get('params', {}))
+            rendered = render_template(raw, step.params)
             if joined_glue == 'statement':
                 # Each fragment is its own statement; strip trailing `;` so we
                 # can join cleanly and add one big trailing `;` at the end.
@@ -627,7 +627,7 @@ class Executor:
         sudo = self.db_config.get('docker_sudo', True)
         docker_prefix = ['sudo', 'docker'] if sudo else ['docker']
 
-        names = [s['name'] for s in group]
+        names = [s.name for s in group]
         log.info(
             f"joined_group '{joined_label}' (glue={joined_glue}) — fusing "
             f"{len(group)} psql steps ({names[0]} … {names[-1]}, "
@@ -662,12 +662,12 @@ class Executor:
         records = []
         for step in group:
             records.append({
-                "name": step['name'],
+                "name": step.name,
                 "duration": per_step,
-                "group": step.get('transaction_group'),
+                "group": step.transaction_group,
             })
             self.reporter.add_task_result(
-                task_name=step['name'],
+                task_name=step.name,
                 db_type='PGDUCKDB',
                 metrics={'duration_ms': per_step * 1000.0, 'parallel_degree': 0},
                 plan_content=f"(part of joined_group '{joined_label}', {len(group)} fragments)",
@@ -688,12 +688,12 @@ class Executor:
         ``EXPLAIN (ANALYZE, BUFFERS, VERBOSE, SETTINGS, FORMAT JSON)`` over the
         same psql connection and feeds the JSON into ``PostgresExplainProfiler``.
         """
-        file_path = Path(step['file'])
+        file_path = Path(step.file)
         if not file_path.exists():
             raise FileNotFoundError(f"SQL file not found: {file_path}")
 
         raw_sql = SQLParser.read_sql_file(file_path)
-        params = step.get('params', {})
+        params = step.params
         rendered = render_template(raw_sql, params)
 
         container = self.db_config.get('container_name')
@@ -706,7 +706,7 @@ class Executor:
         db = self.db_config.get('database') or 'postgres'
         sudo = self.db_config.get('docker_sudo', True)
 
-        log.info(f"psql: {step['name']}  ({file_path.name})")
+        log.info(f"psql: {step.name}  ({file_path.name})")
 
         docker_prefix = ['sudo', 'docker'] if sudo else ['docker']
 
@@ -738,11 +738,11 @@ class Executor:
         log.info(f"psql ok  ({duration:.2f}s)  stdout:{len(proc.stdout)} bytes")
 
         # Optional profiling.
-        if step.get('profile') and not _is_ddl(rendered):
+        if step.profile and not _is_ddl(rendered):
             self._capture_psql_profile(step, rendered, container, user, db, sudo, duration)
         else:
             self.reporter.add_task_result(
-                task_name=step['name'],
+                task_name=step.name,
                 db_type='PGDUCKDB',
                 metrics={'duration_ms': duration * 1000.0, 'parallel_degree': 0},
                 plan_content='(profiling disabled for this step)',
@@ -767,14 +767,14 @@ class Executor:
         )
         if proc.returncode != 0:
             stderr_text = (proc.stderr or b'').decode('utf-8', errors='replace')
-            log.warning(f"EXPLAIN failed for {step['name']}: {stderr_text[:300]}")
+            log.warning(f"EXPLAIN failed for {step.name}: {stderr_text[:300]}")
             return
 
         import json as _json
         try:
             plan_json = _json.loads(proc.stdout.decode('utf-8'))
         except Exception as e:
-            log.warning(f"Could not parse EXPLAIN JSON for {step['name']}: {e}")
+            log.warning(f"Could not parse EXPLAIN JSON for {step.name}: {e}")
             return
 
         profiler = PostgresExplainProfiler()
@@ -785,7 +785,7 @@ class Executor:
             profiler.metrics['duration_ms'] = root.get('Execution Time', duration_s * 1000.0)
 
         self.reporter.add_task_result(
-            task_name=step['name'],
+            task_name=step.name,
             db_type='PGDUCKDB',
             metrics=profiler.get_metrics(),
             plan_content=profiler.get_plan_content(),
@@ -798,7 +798,7 @@ class Executor:
         Manifest params are forwarded as --key value CLI arguments,
         so any python step can use argparse to receive them.
         """
-        file_path = Path(step['file'])
+        file_path = Path(step.file)
         if not file_path.exists():
             raise FileNotFoundError(f"Python script not found: {file_path}")
 
@@ -806,7 +806,7 @@ class Executor:
 
         try:
             cmd = [sys.executable, str(file_path)]
-            for key, value in step.get('params', {}).items():
+            for key, value in step.params.items():
                 cmd.extend([f"--{key}", str(value)])
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             log.info(f"Script output: {result.stdout}")

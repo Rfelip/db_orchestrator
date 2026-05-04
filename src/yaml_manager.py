@@ -1,7 +1,10 @@
 import logging
 from datetime import datetime
-from ruamel.yaml import YAML
 from pathlib import Path
+
+from ruamel.yaml import YAML
+
+from src.types import ManifestConfig
 
 log = logging.getLogger(__name__)
 
@@ -22,24 +25,31 @@ class YamlManager:
         self.yaml = YAML()
         self.yaml.preserve_quotes = True
 
-    def load_manifest(self):
-        """
-        Loads the YAML manifest.
+    def load_manifest(self) -> ManifestConfig:
+        """Load and validate the YAML manifest into a typed `ManifestConfig`.
 
-        Returns:
-            dict: The parsed YAML content.
+        Validation runs at parse time: unknown step keys, missing
+        required fields, and invalid `type` / `joined_glue` /
+        `cleanup_mode` values all raise ValueError before execution
+        begins. Existing manifests with only recognised keys remain
+        valid without modification.
+
+        `disable_step` still reads/writes the raw YAML directly to
+        preserve comments — this typed view is for the executor and any
+        downstream tool, not for round-tripping back to disk.
         """
         if not self.manifest_path.exists():
             log.error(f"Manifest file not found at {self.manifest_path}")
             raise FileNotFoundError(f"Manifest file not found at {self.manifest_path}")
 
-        try:
-            with open(self.manifest_path, 'r', encoding='utf-8') as f:
-                data = self.yaml.load(f)
-            return data
-        except Exception as e:
-            log.error(f"Failed to load manifest: {e}")
-            raise
+        with open(self.manifest_path, 'r', encoding='utf-8') as f:
+            raw = self.yaml.load(f)
+        # Coerce ruamel's CommentedMap/CommentedSeq into plain types
+        # before validation so downstream code doesn't see ruamel-
+        # specific objects. ruamel maps/sequences ARE Mapping/Sequence
+        # instances so dict/list copies work transparently.
+        plain = _to_plain(raw)
+        return ManifestConfig.from_dict(plain or {})
 
     def disable_step(self, step_name):
         """
@@ -89,6 +99,20 @@ class YamlManager:
             
             log.info(f"Step '{step_name}' successfully disabled in manifest.")
 
-        except Exception as e:
+        except (OSError, KeyError, AttributeError) as e:
             log.error(f"Failed to update manifest for step '{step_name}': {e}")
             raise
+
+
+def _to_plain(node):
+    """Recursively coerce ruamel CommentedMap/CommentedSeq into dict/list.
+
+    The validation layer (Step.from_dict, ManifestConfig.from_dict)
+    accepts any Mapping, but downstream code that pickles, json-dumps,
+    or copies the data structure is happier with plain Python types.
+    """
+    if isinstance(node, dict):
+        return {k: _to_plain(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_to_plain(v) for v in node]
+    return node

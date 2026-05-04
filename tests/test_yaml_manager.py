@@ -41,10 +41,11 @@ class TestYamlManager(unittest.TestCase):
         shutil.rmtree(self.test_dir)
 
     def test_load_manifest(self):
-        data = self.manager.load_manifest()
-        self.assertIn('steps', data)
-        self.assertEqual(len(data['steps']), 2)
-        self.assertEqual(data['steps'][0]['name'], 'Step 1')
+        manifest = self.manager.load_manifest()
+        self.assertEqual(len(manifest.steps), 2)
+        self.assertEqual(manifest.steps[0].name, 'Step 1')
+        self.assertTrue(manifest.steps[0].enabled)
+        self.assertFalse(manifest.steps[1].enabled)
 
     def test_load_manifest_file_not_found(self):
         manager = YamlManager(Path(self.test_dir) / "non_existent.yaml")

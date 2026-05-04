@@ -3,6 +3,18 @@ from unittest.mock import MagicMock, patch, mock_open
 import sys
 from pathlib import Path
 from src.executor import Executor, _is_ddl
+from src.types import ManifestConfig, Step
+
+
+def _step(**kwargs) -> Step:
+    """Test helper — Step.from_dict with sensible defaults so each test
+    only spells the fields it cares about."""
+    payload = {"name": "step", "type": "sql", **kwargs}
+    return Step.from_dict(payload)
+
+
+def _manifest(*steps: Step) -> ManifestConfig:
+    return ManifestConfig(steps=list(steps))
 
 
 class TestIsDdl(unittest.TestCase):
@@ -58,8 +70,8 @@ class TestJoinedGroup(unittest.TestCase):
         # _execute_joined_psql_group itself doesn't validate types — that's done
         # by the caller (_run_steps). Test via _run_steps with a stub.
         steps = [
-            {'name': 'a', 'type': 'psql',   'file': '/tmp/x.sql', 'enabled': True, 'joined_group': 'g1'},
-            {'name': 'b', 'type': 'python', 'file': '/tmp/x.py',  'enabled': True, 'joined_group': 'g1'},
+            _step(name='a', type='psql',   file='/tmp/x.sql', joined_group='g1'),
+            _step(name='b', type='python', file='/tmp/x.py',  joined_group='g1'),
         ]
         ym = MagicMock()
         ym.disable_step = MagicMock()
@@ -84,8 +96,8 @@ class TestJoinedGroup(unittest.TestCase):
             mock_path.return_value = instance
 
             group = [
-                {'name': 'phase1', 'type': 'psql', 'file': '/tmp/p1.sql', 'joined_group': 'mq'},
-                {'name': 'phase2', 'type': 'psql', 'file': '/tmp/p2.sql', 'joined_group': 'mq'},
+                _step(name='phase1', type='psql', file='/tmp/p1.sql', joined_group='mq'),
+                _step(name='phase2', type='psql', file='/tmp/p2.sql', joined_group='mq'),
             ]
             records = self.executor._execute_joined_psql_group(group)
 
@@ -110,7 +122,7 @@ class TestJoinedGroup(unittest.TestCase):
         with patch('src.executor.Path') as mock_path:
             mock_path.return_value.exists.return_value = True
 
-            group = [{'name': 'a', 'type': 'psql', 'file': '/tmp/x.sql', 'joined_group': 'g'}]
+            group = [_step(name='a', type='psql', file='/tmp/x.sql', joined_group='g')]
             with self.assertRaises(Exception):
                 self.executor._execute_joined_psql_group(group)
 
@@ -148,7 +160,7 @@ class TestExecutor(unittest.TestCase):
     def test_run_no_steps(self, MockReporter, MockDB, MockNotifier, MockYaml):
         # Setup mock manifest
         mock_yaml_instance = MockYaml.return_value
-        mock_yaml_instance.load_manifest.return_value = {'steps': []}
+        mock_yaml_instance.load_manifest.return_value = _manifest()
 
         executor = Executor(self.manifest_path, self.db_config, self.notifier_config)
         
@@ -166,16 +178,14 @@ class TestExecutor(unittest.TestCase):
     @patch('src.executor.OracleMonitorProfiler')
     def test_run_sql_step_success_oracle(self, MockOracleProfiler, MockReporter, mock_render, mock_parser, mock_input, MockDB, MockNotifier, MockYaml):
         # Setup steps
-        steps = [{
-            'name': 'Test SQL',
-            'file': 'test.sql',
-            'type': 'sql',
-            'enabled': True,
-            'transaction_group': 1,
-            'cleanup_target': None
-        }]
+        steps = [_step(
+            name='Test SQL',
+            file='test.sql',
+            type='sql',
+            transaction_group='tg1',
+        )]
         mock_yaml_instance = MockYaml.return_value
-        mock_yaml_instance.load_manifest.return_value = {'steps': steps}
+        mock_yaml_instance.load_manifest.return_value = _manifest(*steps)
         
         # Setup DB
         mock_db_instance = MockDB.return_value
@@ -216,8 +226,8 @@ class TestExecutor(unittest.TestCase):
     @patch('builtins.input', return_value='n')
     @patch('src.executor.Reporter')
     def test_run_user_abort(self, MockReporter, mock_input, MockDB, MockNotifier, MockYaml):
-        steps = [{'name': 'S1', 'enabled': True}]
-        MockYaml.return_value.load_manifest.return_value = {'steps': steps}
+        steps = [_step(name='S1', type='sql', file='x.sql')]
+        MockYaml.return_value.load_manifest.return_value = _manifest(*steps)
         
         executor = Executor(self.manifest_path, self.db_config, self.notifier_config)
         
@@ -234,13 +244,12 @@ class TestExecutor(unittest.TestCase):
     @patch('src.executor.subprocess.run')
     @patch('src.executor.Reporter')
     def test_run_python_step(self, MockReporter, mock_subprocess, mock_input, MockDB, MockNotifier, MockYaml):
-         steps = [{
-            'name': 'Test Py',
-            'file': 'script.py',
-            'type': 'python',
-            'enabled': True
-        }]
-         MockYaml.return_value.load_manifest.return_value = {'steps': steps}
+         steps = [_step(
+            name='Test Py',
+            file='script.py',
+            type='python',
+        )]
+         MockYaml.return_value.load_manifest.return_value = _manifest(*steps)
          
          # Mock file existence check
          with patch('src.executor.Path.exists', return_value=True):
