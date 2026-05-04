@@ -163,3 +163,7 @@ cython_debug/
 
 # Project-specific
 logs/
+
+# Reports + ad-hoc provenance from runs (regenerated, not source)
+output/
+reports/
