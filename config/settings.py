@@ -1,8 +1,49 @@
 import os
+import re
 from dotenv import load_dotenv, find_dotenv
 import logging
 
 log = logging.getLogger(__name__)
+
+
+_TARGET_KEY_RE = re.compile(r"^DB_TARGET_([A-Z0-9_]+)_([A-Z0-9_]+)$")
+
+
+def load_targets() -> dict[str, dict[str, str]]:
+    """Read named DB targets from the environment.
+
+    Targets are declared in `.env` with the prefix `DB_TARGET_<NAME>_`,
+    where everything after the prefix is the field name. Example:
+
+        DB_TARGET_MR3_TRANSPORT=ssh+wsl
+        DB_TARGET_MR3_SSH=adm@100.95.184.17
+        DB_TARGET_MR3_CONTAINER=pgduckdb
+        DB_TARGET_MR3_PG_USER=postgres
+        DB_TARGET_MR3_PG_DATABASE=labma_benchmark
+
+    Resolves to:
+
+        {"MR3": {"transport": "ssh+wsl", "ssh": "adm@100.95.184.17",
+                  "container": "pgduckdb", "pg_user": "postgres",
+                  "pg_database": "labma_benchmark"}}
+
+    The keys are lowercased so callers pass them as `run_sql` kwargs
+    directly. Caller usage:
+
+        run_sql("SELECT 1", target="MR3")
+
+    `target=` does the lookup and dispatches to the right transport.
+    No secrets in the caller's code; nothing for the caller to handle.
+    """
+    load_dotenv(find_dotenv(usecwd=True), override=True)
+    targets: dict[str, dict[str, str]] = {}
+    for env_key, env_val in os.environ.items():
+        m = _TARGET_KEY_RE.match(env_key)
+        if not m or env_val == "":
+            continue
+        name, field = m.group(1), m.group(2).lower()
+        targets.setdefault(name, {})[field] = env_val
+    return targets
 
 def load_settings():
     """

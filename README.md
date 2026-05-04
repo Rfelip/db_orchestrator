@@ -32,22 +32,46 @@ python main.py --query "SELECT count(*) FROM users"
 
 ### As a library
 
+The simplest path is **named targets**. Declare each database the
+caller might reach in `.env` with `DB_TARGET_<NAME>_*` keys (see
+`config/.env.example` for the full template), then:
+
 ```python
-from config.settings import load_settings
-from src.api import run_sql, run_manifest
+from src.api import run_sql
 
-settings = load_settings()
-
-# Single-statement query — returns a QueryResult with columns + rows.
+# Caller doesn't see secrets, transport details, or SSH plumbing.
 result = run_sql(
-    "SELECT id, name FROM users WHERE active = :active",
-    db_config=settings['db'],
-    params={'active': True},
+    "SELECT count(*) AS n FROM tabua_pura_subpops WHERE emp = 'MON'",
+    target="MR3",
     dql_only=True,
 )
-print(result.columns, result.row_count)
+print(result.columns, result.rows, result.elapsed_ms)
+```
 
-# Full manifest — same flow as the CLI, just callable from Python.
+Two transports ship today:
+
+  - **direct** — SQLAlchemy connection to a host:port. Use for local
+    Postgres, Oracle, or any DB whose port the caller can reach.
+  - **ssh+wsl** — `ssh adm@host wsl docker exec -i <container> psql
+    --csv -f -` with SQL on stdin. Use for containerised DBs reachable
+    only via SSH (e.g. MR3's pgduckdb, where Tailscale terminates at
+    the Windows host and the container's port is not visible).
+
+The transport is set by `DB_TARGET_<NAME>_TRANSPORT` in `.env`. The
+caller never has to know which one fires.
+
+Every `run_sql` call appends a JSONL line to
+`output/_ad_hoc/_provenance.jsonl` with the timestamp, fetch name, SQL
+hash, transport, row count, elapsed time, status (ok / error), and
+error stderr if any. Disable with `log_provenance=False`.
+
+For full-manifest runs:
+
+```python
+from config.settings import load_settings
+from src.api import run_manifest
+
+settings = load_settings()
 run_manifest(
     "queue/manifest.yaml",
     db_config=settings['db'],
@@ -56,9 +80,8 @@ run_manifest(
 )
 ```
 
-`run_sql` / `run_manifest` are the canonical entry points. `main.py` is
-a thin CLI wrapper around them; downstream code that needs to drive
-the orchestrator from Python should import directly from `src.api`.
+`run_sql` / `run_manifest` are the canonical entry points. `main.py`
+is a thin CLI wrapper around them.
 
 ## Configuration
 
