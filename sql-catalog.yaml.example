@@ -1,0 +1,36 @@
+# SQL Catalog — registry of named SQL files (optional).
+#
+# When present, manifests can reference SQL by `sql_id:` instead of by
+# `file:` path. The orchestrator looks up the file at parse time:
+#
+#     # in your manifest.yaml
+#     steps:
+#       - name: step_one
+#         type: sql
+#         sql_id: load_staging      # resolves through this file
+#
+# Lookup order: sql-catalog.yaml next to the manifest, then in cwd.
+# If neither exists and a step uses sql_id, the load fails fast.
+#
+# Required fields per entry: `id`, `file`. Optional: `intent`,
+# `read_only`, `expected_duration_s`. Future tooling (write-protection
+# guards, scheduling hints, alert thresholds) can read those.
+
+sql:
+  - id: load_staging
+    file: scripts/sql/load_staging.sql
+    intent: "Load raw rows from source system into staging table."
+    read_only: false
+    expected_duration_s: 60
+
+  - id: reconcile
+    file: scripts/sql/reconcile.sql
+    intent: "Match staging rows against canonical IDs and tag mismatches."
+    read_only: false
+    expected_duration_s: 180
+
+  - id: counts
+    file: scripts/sql/counts.sql
+    intent: "Per-(year, table) row counts for the dashboard."
+    read_only: true
+    expected_duration_s: 5

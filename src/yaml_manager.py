@@ -4,9 +4,14 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 
+from src.sql_catalog import SqlCatalog
 from src.types import ManifestConfig
 
 log = logging.getLogger(__name__)
+
+CATALOG_FILENAME = "sql-catalog.yaml"
+"""Filename the manifest loader looks for, in priority order:
+the manifest's own directory, then the repo root (cwd)."""
 
 class YamlManager:
     """
@@ -34,6 +39,12 @@ class YamlManager:
         begins. Existing manifests with only recognised keys remain
         valid without modification.
 
+        Steps using `sql_id:` (instead of `file:`) are resolved against
+        a `sql-catalog.yaml` found alongside the manifest or, failing
+        that, in the current working directory. If no catalog is found
+        and a step uses sql_id, the lookup raises CatalogError. Steps
+        that use `file:` directly are unaffected.
+
         `disable_step` still reads/writes the raw YAML directly to
         preserve comments — this typed view is for the executor and any
         downstream tool, not for round-tripping back to disk.
@@ -44,12 +55,24 @@ class YamlManager:
 
         with open(self.manifest_path, 'r', encoding='utf-8') as f:
             raw = self.yaml.load(f)
-        # Coerce ruamel's CommentedMap/CommentedSeq into plain types
-        # before validation so downstream code doesn't see ruamel-
-        # specific objects. ruamel maps/sequences ARE Mapping/Sequence
-        # instances so dict/list copies work transparently.
         plain = _to_plain(raw)
-        return ManifestConfig.from_dict(plain or {})
+        catalog = self._load_catalog()
+        return ManifestConfig.from_dict(plain or {}, catalog=catalog)
+
+    def _load_catalog(self) -> SqlCatalog:
+        """Look for `sql-catalog.yaml` next to the manifest, then in
+        cwd. Returns an empty catalog if neither exists — sql_id
+        resolution will then fail loudly, but manifests using `file:`
+        directly continue to work."""
+        candidates = [
+            self.manifest_path.parent / CATALOG_FILENAME,
+            Path.cwd() / CATALOG_FILENAME,
+        ]
+        for path in candidates:
+            if path.exists():
+                log.info(f"Loaded SQL catalog from {path}")
+                return SqlCatalog.from_yaml(path)
+        return SqlCatalog.empty()
 
     def disable_step(self, step_name):
         """

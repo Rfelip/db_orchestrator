@@ -33,7 +33,7 @@ _VALID_TYPES = frozenset({"sql", "plsql", "psql", "bulk_insert", "python", "mani
 # raises at parse time.
 _RECOGNISED_KEYS = frozenset({
     "name", "type", "enabled", "description",
-    "file", "params",
+    "file", "sql_id", "params",
     "transaction_group", "joined_group", "joined_glue",
     "cleanup_target", "cleanup_mode",
     "profile", "output_file",
@@ -58,8 +58,12 @@ class Step:
     enabled: bool = True
     description: str | None = None
 
-    # Source artifacts
+    # Source artifacts. `file` is the absolute or relative .sql path;
+    # `sql_id` is a name registered in `sql-catalog.yaml` that the
+    # manifest loader resolves to a file. Exactly one of the two may be
+    # set per step.
     file: str | None = None
+    sql_id: str | None = None
     params: Mapping[str, Any] = field(default_factory=dict)
 
     # Grouping
@@ -103,6 +107,11 @@ class Step:
                 f"step '{raw['name']}': type '{raw['type']}' is not one of "
                 f"{sorted(_VALID_TYPES)}"
             )
+        if raw.get("file") and raw.get("sql_id"):
+            raise ValueError(
+                f"step '{raw['name']}': set either 'file' or 'sql_id', "
+                f"not both."
+            )
         joined_glue = raw.get("joined_glue")
         if joined_glue is not None and joined_glue not in ("statement", "raw"):
             raise ValueError(
@@ -121,6 +130,7 @@ class Step:
             enabled=bool(raw.get("enabled", True)),
             description=raw.get("description"),
             file=raw.get("file"),
+            sql_id=raw.get("sql_id"),
             params=dict(raw.get("params") or {}),
             transaction_group=GroupId(raw["transaction_group"]) if raw.get("transaction_group") else None,
             joined_group=GroupId(raw["joined_group"]) if raw.get("joined_group") else None,
@@ -142,7 +152,12 @@ class ManifestConfig:
     steps: list[Step]
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "ManifestConfig":
+    def from_dict(cls, raw: Mapping[str, Any], *, catalog=None) -> "ManifestConfig":
+        """Build from a YAML-loaded mapping. If `catalog` is supplied
+        (a `SqlCatalog`), every step that uses `sql_id:` instead of
+        `file:` is resolved into a step with `file:` set, so downstream
+        code never has to know whether the path came from a catalog or
+        from inline manifest text."""
         if not isinstance(raw, Mapping):
             raise ValueError(
                 f"manifest must be a mapping, got {type(raw).__name__}"
@@ -150,4 +165,17 @@ class ManifestConfig:
         raw_steps = raw.get("steps") or []
         if not isinstance(raw_steps, list):
             raise ValueError("manifest 'steps' must be a list")
-        return cls(steps=[Step.from_dict(s) for s in raw_steps])
+        steps = [Step.from_dict(s) for s in raw_steps]
+        if catalog is not None:
+            steps = [_resolve_sql_id(s, catalog) for s in steps]
+        return cls(steps=steps)
+
+
+def _resolve_sql_id(step: "Step", catalog) -> "Step":
+    """If the step references a sql_id, resolve it against the catalog
+    and return a new step with `file` filled in. Otherwise pass through."""
+    if step.sql_id is None:
+        return step
+    entry = catalog.resolve(step.sql_id)
+    from dataclasses import replace
+    return replace(step, file=entry.file, sql_id=None)

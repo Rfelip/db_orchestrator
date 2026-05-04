@@ -83,6 +83,34 @@ run_manifest(
 `run_sql` / `run_manifest` are the canonical entry points. `main.py`
 is a thin CLI wrapper around them.
 
+## SQL catalog (optional)
+
+A `sql-catalog.yaml` next to your manifest gives every SQL file a
+stable identifier. Manifests then reference SQL by `sql_id:` instead
+of `file:`, and the orchestrator resolves the path at load time.
+
+```yaml
+# sql-catalog.yaml
+sql:
+  - id: load_staging
+    file: scripts/sql/load_staging.sql
+    intent: "Load raw rows from source into staging table."
+    read_only: false
+    expected_duration_s: 60
+```
+
+```yaml
+# manifest.yaml
+steps:
+  - name: ingest
+    type: sql
+    sql_id: load_staging        # ← looked up in the catalog
+```
+
+The catalog is optional — manifests using `file:` directly keep
+working unchanged. See `sql-catalog.yaml.example` for the full
+template.
+
 ## Configuration
 
 All config lives in `config/.env`. Required variables:
