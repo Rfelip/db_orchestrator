@@ -238,19 +238,57 @@ class Executor:
         Returns:
             list: Executed step records [{"name", "duration", "group"}, ...].
         """
-        executed_steps = []
+        executed_steps: list[dict] = []
         current_session = None
         current_group = None
 
-        # Coalesce consecutive steps with the same joined_group label into a
-        # single fused execution. Currently only `type: psql` joining is
-        # implemented (concatenate rendered SQL with ";" separator, submit as
-        # one psql -f - call). Useful for splitting a megaquery into N readable
-        # phase files without losing DuckDB's pipeline optimization.
-        items = []
+        for item_type, payload in self._coalesce_into_items(execution_queue):
+            if item_type == 'joined':
+                current_session, current_group = self._close_session(
+                    current_session, current_group, commit=True,
+                )
+                self._execute_joined_item(payload, yaml_manager, executed_steps, notify)
+                continue
+
+            step = payload[0]
+            current_session, current_group = self._ensure_session(
+                step, db_manager, current_session, current_group,
+            )
+
+            try:
+                start_time = time.time()
+                self._cleanup_step(step, db_manager, current_session)
+                # Step types that cannot live inside the SQLAlchemy session
+                # (psql / python / manifest) commit + close it first so the
+                # subprocess sees consistent state.
+                current_session, current_group = self._dispatch_step(
+                    step, db_manager, current_session, current_group,
+                )
+                duration = time.time() - start_time
+                self._post_process_step(
+                    step, duration, yaml_manager, executed_steps, notify,
+                )
+            except Exception as e:
+                self._handle_step_error(step, e, current_session, notify)
+                current_session, current_group = None, None
+                raise
+
+        current_session, _ = self._close_session(
+            current_session, current_group, commit=True,
+        )
+        return executed_steps
+
+    # ------- helpers extracted from _run_steps -------------------------------
+
+    def _coalesce_into_items(self, queue) -> list[tuple[str, list]]:
+        """Group consecutive steps sharing the same `joined_group` label
+        into one item; everything else passes through as a single-step
+        item. Returns a list of (kind, [Step, ...]) tuples where `kind`
+        is `'joined'` or `'single'`."""
+        items: list[tuple[str, list]] = []
         i = 0
-        while i < len(execution_queue):
-            s = execution_queue[i]
+        while i < len(queue):
+            s = queue[i]
             jg = s.joined_group
             if jg is None:
                 items.append(('single', [s]))
@@ -258,180 +296,172 @@ class Executor:
             else:
                 grp = [s]
                 j = i + 1
-                while j < len(execution_queue) and execution_queue[j].joined_group == jg:
-                    grp.append(execution_queue[j])
+                while j < len(queue) and queue[j].joined_group == jg:
+                    grp.append(queue[j])
                     j += 1
                 items.append(('joined', grp))
                 i = j
+        return items
 
-        for item_type, payload in items:
-            if item_type == 'joined':
-                # Sanity check: same step type required.
-                types = {s.type for s in payload}
-                if types != {'psql'}:
-                    raise RuntimeError(
-                        f"joined_group '{payload[0].joined_group}' must contain only "
-                        f"`type: psql` steps. Got types: {sorted(types)}"
-                    )
-                # Joined groups don't share a SQLAlchemy session — psql handles
-                # its own connection per call. Close any open session first.
-                if current_session:
-                    current_session.commit()
-                    current_session.close()
-                    current_session = None
-                    current_group = None
+    def _execute_joined_item(self, payload, yaml_manager,
+                                executed_steps, notify) -> None:
+        """Joined-group dispatch: validate uniformity, run the fused psql,
+        record results, disable in manifest, fire one alert if total
+        wall-time crosses 5s."""
+        types = {s.type for s in payload}
+        if types != {'psql'}:
+            raise RuntimeError(
+                f"joined_group '{payload[0].joined_group}' must contain only "
+                f"`type: psql` steps. Got types: {sorted(types)}"
+            )
+        try:
+            recs = self._execute_joined_psql_group(payload)
+        except Exception as e:
+            if not hasattr(e, 'failed_step'):
+                e.failed_step = f"joined_group:{payload[0].joined_group}"
+            raise
 
-                try:
-                    recs = self._execute_joined_psql_group(payload)
-                    executed_steps.extend(recs)
-                    for s in payload:
-                        yaml_manager.disable_step(s.name)
-                    if notify:
-                        total = sum(r['duration'] for r in recs)
-                        if total > 5:
-                            self.notifier.send_alert(
-                                "Joined Group Completed",
-                                f"joined_group '{payload[0].joined_group}' "
-                                f"({len(payload)} steps) completed in {total:.2f}s.",
-                            )
-                except Exception as e:
-                    if not hasattr(e, 'failed_step'):
-                        # Best-effort: blame the group's first step.
-                        e.failed_step = f"joined_group:{payload[0].joined_group}"
-                    raise
-                continue
+        executed_steps.extend(recs)
+        for s in payload:
+            yaml_manager.disable_step(s.name)
+        if notify:
+            total = sum(r['duration'] for r in recs)
+            if total > 5:
+                self.notifier.send_alert(
+                    "Joined Group Completed",
+                    f"joined_group '{payload[0].joined_group}' "
+                    f"({len(payload)} steps) completed in {total:.2f}s.",
+                )
 
-            step = payload[0]
-            step_name = step.name
-            step_type = step.type
-            step_group = step.transaction_group
+    def _ensure_session(self, step, db_manager, current_session, current_group):
+        """Open / reuse / close the SQLAlchemy session to match the
+        step's transaction_group. Returns the (session, group) tuple
+        the caller should adopt."""
+        step_group = step.transaction_group
+        if step_group != current_group:
+            current_session, current_group = self._close_session(
+                current_session, current_group, commit=True,
+            )
+            current_session = db_manager.get_session()
+            current_group = step_group
+            if step_group is not None:
+                log.info(f"Started transaction group {current_group}")
+        if not current_session:
+            current_session = db_manager.get_session()
+        log.info(f"Processing step: {step.name}")
+        return current_session, current_group
 
-            log.info(f"Processing step: {step_name}")
+    def _close_session(self, session, group, *, commit: bool):
+        """Commit-or-rollback and close `session`, returning (None, None)
+        for the caller to adopt as its new state. No-op when session is
+        None already."""
+        if session is None:
+            return None, None
+        if commit:
+            log.info(f"Committing transaction group {group}")
+            session.commit()
+        else:
+            session.rollback()
+        session.close()
+        return None, None
 
-            # Transaction Management
-            if step_group != current_group:
-                if current_session:
-                    log.info(f"Committing transaction group {current_group}")
-                    current_session.commit()
-                    current_session.close()
-                    current_session = None
+    def _cleanup_step(self, step, db_manager, session) -> None:
+        """Pre-flight cleanup of `step.cleanup_target` if set."""
+        if not step.cleanup_target:
+            return
+        if step.cleanup_mode == 'truncate':
+            db_manager.truncate_table(step.cleanup_target, session)
+        else:
+            db_manager.drop_table(step.cleanup_target, session)
 
-                if step_group is not None:
-                    current_group = step_group
-                    current_session = db_manager.get_session()
-                    log.info(f"Started transaction group {current_group}")
-                else:
-                    current_group = None
-                    current_session = db_manager.get_session()
+    def _dispatch_step(self, step, db_manager, current_session, current_group):
+        """Route one step to its type-specific handler. Returns the
+        (session, group) tuple — for step types that operate outside
+        the SQLAlchemy session (psql / python / manifest), the session
+        is closed and (None, None) returned."""
+        if step.type in ('sql', 'plsql'):
+            self._execute_sql_step(step, db_manager, current_session)
+            return current_session, current_group
+        if step.type == 'bulk_insert':
+            self._execute_bulk_insert_step(step, db_manager, current_session)
+            return current_session, current_group
+        # The next three step types break out of any open session — they
+        # invoke external processes (psql, python, child manifest) that
+        # don't share state with SQLAlchemy.
+        current_session, current_group = self._close_session(
+            current_session, current_group, commit=True,
+        )
+        if step.type == 'psql':
+            self._execute_psql_step(step)
+        elif step.type == 'python':
+            self._execute_python_step(step)
+        elif step.type == 'manifest':
+            self._execute_manifest_step(step, db_manager)
+        else:
+            log.warning(f"Unknown step type: {step.type}")
+        return current_session, current_group
 
-            if not current_session:
-                current_session = db_manager.get_session()
+    def _post_process_step(self, step, duration, yaml_manager,
+                            executed_steps, notify) -> None:
+        """Record the executed step, disable it in the manifest, and
+        fire a completion alert when the step opted in or wall-time
+        crossed the threshold."""
+        executed_steps.append({
+            "name": step.name,
+            "duration": duration,
+            "group": step.transaction_group,
+        })
+        yaml_manager.disable_step(step.name)
+        if not notify:
+            return
+        if not (step.notify or duration > 5):
+            return
+        desc = f"\n{step.description}" if step.description else ""
+        self.notifier.send_alert(
+            "Step Completed",
+            f"Step '{step.name}' completed in {duration:.2f}s.{desc}",
+            ping=step.ping_on_end,
+        )
 
-            try:
-                # Pre-flight: Cleanup
-                if step.cleanup_target:
-                    mode = step.cleanup_mode
-                    if mode == 'truncate':
-                        db_manager.truncate_table(step.cleanup_target, current_session)
-                    else:
-                        db_manager.drop_table(step.cleanup_target, current_session)
-
-                # Execution
-                start_time = time.time()
-
-                if step_type in ['sql', 'plsql']:
-                    self._execute_sql_step(step, db_manager, current_session)
-                elif step_type == 'bulk_insert':
-                    self._execute_bulk_insert_step(step, db_manager, current_session)
-                elif step_type == 'psql':
-                    # Multi-statement files routed via `docker exec ... psql -f`.
-                    # Keeps Postgres dollar-quoting (`$q$ ... $q$`) intact and supports
-                    # the pgduckdb pipeline where most SQL files mix DDL+DML.
-                    if current_session:
-                        current_session.commit()
-                        current_session.close()
-                        current_session = None
-                        current_group = None
-                    self._execute_psql_step(step)
-                elif step_type == 'python':
-                    # Python scripts break transactions. Commit current.
-                    if current_session:
-                        current_session.commit()
-                        current_session.close()
-                        current_session = None
-                        current_group = None
-
-                    self._execute_python_step(step)
-                elif step_type == 'manifest':
-                    # Child manifests manage their own transactions.
-                    if current_session:
-                        current_session.commit()
-                        current_session.close()
-                        current_session = None
-                        current_group = None
-
-                    self._execute_manifest_step(step, db_manager)
-                else:
-                    log.warning(f"Unknown step type: {step_type}")
-                    continue
-
-                duration = time.time() - start_time
-                executed_steps.append({"name": step_name, "duration": duration, "group": step_group})
-
-                # Post-Process
-                yaml_manager.disable_step(step_name)
-
-                if notify and (step.notify or duration > 5):
-                    desc = f"\n{step.description}" if step.description else ""
-                    self.notifier.send_alert(
-                        "Step Completed",
-                        f"Step '{step_name}' completed in {duration:.2f}s.{desc}",
-                        ping=step.ping_on_end
-                    )
-
-            except Exception as e:
-                log.error(f"Error in step '{step_name}': {e}")
-                if current_session:
-                    current_session.rollback()
-                    current_session.close()
-                    current_session = None
-                if notify:
-                    # Extract clean error from SQLAlchemy wrapper
-                    err_msg = str(e)
-                    # Pull out the actual PG error (e.g. "relation X does not exist")
-                    pg_match = re.search(r'\(psycopg2\.errors\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
-                    if pg_match:
-                        clean_err = pg_match.group(1).strip()
-                    else:
-                        pg_match2 = re.search(r'psycopg2\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
-                        clean_err = pg_match2.group(1).strip() if pg_match2 else err_msg[:300]
-                    # Surface enough context for the recipient to find the
-                    # rendered SQL in the report directory. The sql_hash
-                    # matches the report's per-step prefix so a recipient
-                    # can grep `reports/{ts}/rendered/` directly.
-                    sql_file = step.file or 'unknown'
-                    group_label = step_group or step.joined_group
-                    group_line = f"\n**Group:** `{group_label}`" if group_label else ""
-                    sql_hash = self._sql_hash_for_step(step)
-                    hash_line = f"\n**SQL hash:** `{sql_hash}`" if sql_hash else ""
-                    self.notifier.send_alert(
-                        "Step Failed",
-                        f"**Step:** `{step_name}`\n"
-                        f"**File:** `{sql_file}`{group_line}{hash_line}\n"
-                        f"**Error:** {clean_err}",
-                        ping=step.ping_on_error
-                    )
-                # Preserve the most granular failed step name
-                if not hasattr(e, 'failed_step'):
-                    e.failed_step = step_name
-                raise
-
-        # Final Commit for any open session
+    def _handle_step_error(self, step, exc, current_session, notify) -> None:
+        """Roll back the open session, fire a failure alert with enough
+        context to grep the report dir, and tag `exc` with the most
+        granular failed step name."""
+        log.error(f"Error in step '{step.name}': {exc}")
         if current_session:
-            current_session.commit()
+            current_session.rollback()
             current_session.close()
+        if notify:
+            self.notifier.send_alert(
+                "Step Failed",
+                self._format_failure_body(step, exc),
+                ping=step.ping_on_error,
+            )
+        if not hasattr(exc, 'failed_step'):
+            exc.failed_step = step.name
 
-        return executed_steps
+    def _format_failure_body(self, step, exc) -> str:
+        """Compose the body of a Step Failed alert. Surfaces the source
+        file, transaction/joined group label, and a SHA-256 prefix of
+        the source SQL — the same prefix the report's rendered/ files
+        carry, so the recipient can grep back."""
+        err_msg = str(exc)
+        pg_match = re.search(r'\(psycopg2\.errors\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
+        if pg_match:
+            clean_err = pg_match.group(1).strip()
+        else:
+            pg_match2 = re.search(r'psycopg2\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
+            clean_err = pg_match2.group(1).strip() if pg_match2 else err_msg[:300]
+        sql_file = step.file or 'unknown'
+        group_label = step.transaction_group or step.joined_group
+        group_line = f"\n**Group:** `{group_label}`" if group_label else ""
+        sql_hash = self._sql_hash_for_step(step)
+        hash_line = f"\n**SQL hash:** `{sql_hash}`" if sql_hash else ""
+        return (
+            f"**Step:** `{step.name}`\n"
+            f"**File:** `{sql_file}`{group_line}{hash_line}\n"
+            f"**Error:** {clean_err}"
+        )
 
     def _sql_hash_for_step(self, step) -> str | None:
         """Best-effort SHA-256 prefix of a step's source SQL file.
