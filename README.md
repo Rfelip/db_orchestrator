@@ -1,8 +1,14 @@
 # Database Task Orchestrator
 
-CLI tool that executes sequential database tasks (SQL, PL/SQL, Python scripts) defined in a YAML manifest. Handles transactions, retries, profiling, and notifications.
+A single API for running SQL on databases — Oracle, PostgreSQL, and
+pgduckdb-in-docker. Exposes a YAML-manifest workflow plus a Python
+library (`src.api`) so other code can run queries through the same
+plumbing instead of reinventing it. Handles transactions, retries,
+execution-plan capture, and notifications to Discord and Telegram.
 
 ## Quick Start
+
+### As a CLI
 
 ```bash
 # Install dependencies
@@ -19,7 +25,40 @@ python main.py
 
 # Execute without confirmation prompt
 python main.py --force
+
+# Ad-hoc query mode (DQL only — no DDL/DML)
+python main.py --query "SELECT count(*) FROM users"
 ```
+
+### As a library
+
+```python
+from config.settings import load_settings
+from src.api import run_sql, run_manifest
+
+settings = load_settings()
+
+# Single-statement query — returns a QueryResult with columns + rows.
+result = run_sql(
+    "SELECT id, name FROM users WHERE active = :active",
+    db_config=settings['db'],
+    params={'active': True},
+    dql_only=True,
+)
+print(result.columns, result.row_count)
+
+# Full manifest — same flow as the CLI, just callable from Python.
+run_manifest(
+    "queue/manifest.yaml",
+    db_config=settings['db'],
+    notifier_config=settings['notifier'],
+    force=True,
+)
+```
+
+`run_sql` / `run_manifest` are the canonical entry points. `main.py` is
+a thin CLI wrapper around them; downstream code that needs to drive
+the orchestrator from Python should import directly from `src.api`.
 
 ## Configuration
 

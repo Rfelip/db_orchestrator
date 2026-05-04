@@ -1,6 +1,4 @@
 import argparse
-import csv
-import re
 import sys
 import os
 import json
@@ -12,94 +10,33 @@ from datetime import datetime
 
 from config.settings import load_settings
 from config.logging_config import setup_logging
-from src.executor import Executor
-from src.database import DatabaseManager
+from src.api import DqlOnlyError, run_manifest, run_sql
 
 JOBS_DIR = Path(__file__).parent.parent.parent / "jobs"
 
-# DQL-only guard: reject anything that modifies data or schema
-_FORBIDDEN_PATTERNS = re.compile(
-    r'^\s*(CREATE|DROP|ALTER|TRUNCATE|INSERT|UPDATE|DELETE|MERGE|GRANT|REVOKE|EXEC|EXECUTE|CALL)\b',
-    re.IGNORECASE | re.MULTILINE
-)
 
-
-def _validate_dql(sql):
-    """Reject non-SELECT queries. Returns (ok, error_msg)."""
-    match = _FORBIDDEN_PATTERNS.search(sql)
-    if match:
-        return False, f"Blocked: '{match.group().strip()}' statements are not allowed in query mode. DQL (SELECT) only."
-    return True, None
-
-
-def _build_db_url(db_config):
-    """Build SQLAlchemy URL from config dict."""
-    dialect = db_config['dialect']
-    user = db_config['user']
-    password = db_config['password']
-    host = db_config['host']
-    port = db_config['port']
-    if 'oracle' in dialect:
-        service = db_config['service']
-        return f"{dialect}://{user}:{password}@{host}:{port}/{service}"
-    else:
-        database = db_config['database']
-        return f"{dialect}://{user}:{password}@{host}:{port}/{database}"
-
-
-def _run_query(sql, db_config, output_file=None, limit=None):
-    """Execute a DQL query and write results to CSV (stdout or file)."""
+def _run_query_cli(sql, db_config, output_file=None, limit=None):
+    """CLI wrapper around `run_sql`: writes the QueryResult as CSV to a
+    file (when --output is given) or stdout, and exits non-zero on
+    DqlOnlyError or any database-level failure."""
     log = logging.getLogger(__name__)
-
-    # Validate DQL
-    ok, err = _validate_dql(sql)
-    if not ok:
-        print(f"ERROR: {err}", file=sys.stderr)
-        sys.exit(1)
-
-    # Apply row limit if requested (wrap in subquery)
-    if limit:
-        # ROWNUM is Oracle-only; use LIMIT for other dialects
-        if 'oracle' in db_config.get('dialect', ''):
-            sql = f"SELECT * FROM ({sql}) WHERE ROWNUM <= {int(limit)}"
-        else:
-            sql = f"SELECT * FROM ({sql}) sub LIMIT {int(limit)}"
-
-    db_url = _build_db_url(db_config)
-    db = DatabaseManager(db_url)
-    session = db.get_session()
-
     try:
-        log.info(f"Executing query ({len(sql)} chars)...")
-        result = db.execute_query(sql, session=session)
-        columns = list(result.keys())
-        rows = result.fetchall()
-        log.info(f"Query returned {len(rows)} rows, {len(columns)} columns.")
-
-        # Write CSV
-        if output_file:
-            out = open(output_file, 'w', newline='', encoding='utf-8')
-        else:
-            out = sys.stdout
-
-        writer = csv.writer(out)
-        writer.writerow(columns)
-        for row in rows:
-            writer.writerow(row)
-
-        if output_file:
-            out.close()
-            print(f"Wrote {len(rows)} rows to {output_file}", file=sys.stderr)
-        else:
-            print(f"-- {len(rows)} rows returned", file=sys.stderr)
-
+        result = run_sql(sql, db_config=db_config, limit=limit, dql_only=True)
+    except DqlOnlyError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         log.error(f"Query failed: {e}")
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
-    finally:
-        session.close()
-        db.close()
+
+    if output_file:
+        with open(output_file, 'w', newline='', encoding='utf-8') as fh:
+            result.to_csv(fh)
+        print(f"Wrote {result.row_count} rows to {output_file}", file=sys.stderr)
+    else:
+        result.to_csv(sys.stdout)
+        print(f"-- {result.row_count} rows returned", file=sys.stderr)
 
 
 def _spawn_background(args_list):
@@ -354,25 +291,24 @@ def main():
             if sql.endswith(';'):
                 sql = sql[:-1].strip()
 
-        _run_query(sql, db_config, output_file=args.output, limit=args.limit)
+        _run_query_cli(sql, db_config, output_file=args.output, limit=args.limit)
         return
 
-    # 4. Initialize and Run Executor
+    # 4. Run the manifest end-to-end via the library API.
     manifest_path = Path(args.manifest)
     if not manifest_path.exists():
         log.critical(f"Manifest file not found: {manifest_path}")
         sys.exit(1)
 
     try:
-        executor = Executor(
-            manifest_path=manifest_path,
+        run_manifest(
+            manifest_path,
             db_config=db_config,
             notifier_config=notifier_config,
             dry_run=args.dry_run,
             force=args.force,
-            enable_all=args.enable_all
+            enable_all=args.enable_all,
         )
-        executor.run()
 
     except Exception as e:
         log.critical(f"An unexpected error occurred: {e}")
