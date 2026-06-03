@@ -16,16 +16,16 @@ def load_targets() -> dict[str, dict[str, str]]:
     where everything after the prefix is the field name. Example:
 
         DB_TARGET_MR3_TRANSPORT=ssh+wsl
-        DB_TARGET_MR3_SSH=adm@100.95.184.17
+        DB_TARGET_MR3_SSH=user@host
         DB_TARGET_MR3_CONTAINER=pgduckdb
         DB_TARGET_MR3_PG_USER=postgres
-        DB_TARGET_MR3_PG_DATABASE=labma_benchmark
+        DB_TARGET_MR3_PG_DATABASE=your_database_name
 
     Resolves to:
 
-        {"MR3": {"transport": "ssh+wsl", "ssh": "adm@100.95.184.17",
+        {"MR3": {"transport": "ssh+wsl", "ssh": "user@host",
                   "container": "pgduckdb", "pg_user": "postgres",
-                  "pg_database": "labma_benchmark"}}
+                  "pg_database": "your_database_name"}}
 
     The keys are lowercased so callers pass them as `run_sql` kwargs
     directly. Caller usage:

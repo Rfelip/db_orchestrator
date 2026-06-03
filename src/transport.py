@@ -95,7 +95,7 @@ class SshWslTransport:
     container; CSV output comes back over stdout.
 
     Args:
-        ssh: ssh target, e.g. ``adm@100.95.184.17``.
+        ssh: ssh target, e.g. ``user@host``.
         container: docker container name, e.g. ``pgduckdb``.
         pg_user: postgres user inside the container.
         pg_database: postgres database inside the container.
