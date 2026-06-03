@@ -15,13 +15,20 @@ from src.api import DqlOnlyError, run_manifest, run_sql
 JOBS_DIR = Path(__file__).parent.parent.parent / "jobs"
 
 
-def _run_query_cli(sql, db_config, output_file=None, limit=None):
+def _run_query_cli(sql, db_config=None, target=None, output_file=None, limit=None):
     """CLI wrapper around `run_sql`: writes the QueryResult as CSV to a
     file (when --output is given) or stdout, and exits non-zero on
-    DqlOnlyError or any database-level failure."""
+    DqlOnlyError or any database-level failure.
+
+    Pass `target` to run against a named `DB_TARGET_<NAME>_*` entry (MR3,
+    Oracle, a local mirror, …) — the target supplies transport + secrets.
+    Otherwise pass `db_config` to use the default `.env` connection."""
     log = logging.getLogger(__name__)
     try:
-        result = run_sql(sql, db_config=db_config, limit=limit, dql_only=True)
+        if target:
+            result = run_sql(sql, target=target, limit=limit, dql_only=True)
+        else:
+            result = run_sql(sql, db_config=db_config, limit=limit, dql_only=True)
     except DqlOnlyError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -239,6 +246,13 @@ def main():
         type=int,
         help="Limit number of rows returned (wraps query in ROWNUM)."
     )
+    parser.add_argument(
+        "--target", "-t",
+        type=str,
+        help="Named DB target (DB_TARGET_<NAME>_* in .env), e.g. MR3 or "
+             "ORACLE. Query mode only; supplies transport + secrets so no "
+             "default DB_* connection is needed."
+    )
 
     args = parser.parse_args()
 
@@ -264,16 +278,9 @@ def main():
         _spawn_background(spawn_args)
         return
 
-    # 3. Load Configuration
-    try:
-        settings = load_settings()
-        db_config = settings['db']
-        notifier_config = settings['notifier']
-    except Exception as e:
-        log.critical(f"Failed to load configuration: {e}")
-        sys.exit(1)
-
-    # 3.5. Query mode — DQL only, no manifest needed
+    # 3. Query mode — DQL only, no manifest needed. Handled before the
+    #    default-config load so `--target` can run without any DB_*
+    #    connection in .env (the named target supplies everything).
     if args.query or args.sql_file:
         if args.query and args.sql_file:
             print("ERROR: Use --query or --sql-file, not both.", file=sys.stderr)
@@ -291,10 +298,29 @@ def main():
             if sql.endswith(';'):
                 sql = sql[:-1].strip()
 
-        _run_query_cli(sql, db_config, output_file=args.output, limit=args.limit)
+        if args.target:
+            _run_query_cli(sql, target=args.target,
+                           output_file=args.output, limit=args.limit)
+        else:
+            try:
+                db_config = load_settings()['db']
+            except Exception as e:
+                log.critical(f"Failed to load configuration: {e}")
+                sys.exit(1)
+            _run_query_cli(sql, db_config=db_config,
+                           output_file=args.output, limit=args.limit)
         return
 
-    # 4. Run the manifest end-to-end via the library API.
+    # 4. Load configuration for manifest mode.
+    try:
+        settings = load_settings()
+        db_config = settings['db']
+        notifier_config = settings['notifier']
+    except Exception as e:
+        log.critical(f"Failed to load configuration: {e}")
+        sys.exit(1)
+
+    # 4b. Run the manifest end-to-end via the library API.
     manifest_path = Path(args.manifest)
     if not manifest_path.exists():
         log.critical(f"Manifest file not found: {manifest_path}")

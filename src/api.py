@@ -150,6 +150,8 @@ def run_sql(
     pg_database: str = "postgres",
     wsl: bool = True,
     sudo: bool = True,
+    helper_path: str = "/home/ruan/_orch_duckdb.py",
+    threads: int = 8,
     params: Mapping[str, Any] | None = None,
     limit: int | None = None,
     dql_only: bool = False,
@@ -228,6 +230,11 @@ def run_sql(
                 "database": cfg.get("database"),
                 "service": cfg.get("service"),
             }
+        elif transport in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
+            ssh = cfg["ssh"]
+            wsl = _coerce_bool(cfg.get("wsl", True))
+            helper_path = cfg.get("helper_path", "/home/ruan/_orch_duckdb.py")
+            threads = int(cfg.get("threads", 8))
         else:
             ssh = cfg["ssh"]
             container = cfg["container"]
@@ -255,6 +262,7 @@ def run_sql(
             ssh=ssh, container=container,
             pg_user=pg_user, pg_database=pg_database,
             wsl=wsl, sudo=sudo,
+            helper_path=helper_path, threads=threads,
         )
     else:
         tp = transport  # already a Transport instance

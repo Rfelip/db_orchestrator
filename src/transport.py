@@ -166,6 +166,103 @@ class SshWslTransport:
         return ssh_part + wrapper + docker_part
 
 
+_DUCKDB_HELPER = '''\
+import csv, sys, duckdb
+con = duckdb.connect()
+con.execute("SET threads=%d")
+sql = sys.stdin.read().strip().rstrip(";")
+cur = con.execute(sql)
+cols = [d[0].lower() for d in cur.description]
+w = csv.writer(sys.stdout, lineterminator="\\n")
+w.writerow(cols)
+for row in cur.fetchall():
+    w.writerow(row)
+'''
+"""Remote program for `DuckDbSshTransport`: reads SQL from stdin, runs it
+through DuckDB on the remote host, writes CSV (lowercased headers) to
+stdout. Uploaded to the host once per process."""
+
+
+class DuckDbSshTransport:
+    """Run DuckDB SQL on a remote host via `ssh [wsl] python3 <helper>`.
+
+    The companion of `SshWslTransport`: where that one reaches a
+    containerised Postgres, this one reaches **DuckDB running directly on
+    the host**, so queries that read on-disk parquet trees
+    (`read_parquet([...])`, `glob()`, `filename=true`, `strftime`,
+    `hash`) work — the full DuckDB dialect, which pgduckdb-in-Postgres
+    does not expose.
+
+    The helper script is shipped to `helper_path` on first use (idempotent,
+    once per process) and invoked with the SQL on stdin. No bind params:
+    callers render the SQL before calling.
+
+    Args:
+        ssh: ssh target, e.g. ``adm@100.95.184.17``.
+        helper_path: where the helper lands on the host.
+        wsl: prepend ``wsl`` (host is Windows running WSL). Default True.
+        threads: DuckDB thread count (``SET threads``).
+    """
+
+    name = "ssh+duckdb"
+
+    def __init__(self, *, ssh: str,
+                 helper_path: str = "/home/ruan/_orch_duckdb.py",
+                 wsl: bool = True,
+                 threads: int = 8,
+                 ssh_options: list[str] | None = None) -> None:
+        self.ssh = ssh
+        self.helper_path = helper_path
+        self.wsl = wsl
+        self.threads = threads
+        self.ssh_options = list(ssh_options or [])
+        self._helper_synced = False
+
+    def _ssh_prefix(self) -> list[str]:
+        return ["ssh"] + self.ssh_options + [self.ssh] + (["wsl"] if self.wsl else [])
+
+    def _ensure_helper(self) -> None:
+        if self._helper_synced:
+            return
+        body = (_DUCKDB_HELPER % self.threads).encode("utf-8")
+        proc = subprocess.run(
+            self._ssh_prefix() + ["tee", self.helper_path],
+            input=body, capture_output=True, check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"failed to upload duckdb helper to {self.ssh}:{self.helper_path} "
+                f"(rc={proc.returncode}): {proc.stderr.decode('utf-8', 'replace')[:300]}"
+            )
+        self._helper_synced = True
+
+    def execute(self, sql: str,
+                 params: Mapping[str, Any] | None = None) -> RawResult:
+        if params:
+            raise NotImplementedError(
+                "DuckDbSshTransport does not support :name bind params. "
+                "Render the SQL before calling execute()."
+            )
+        self._ensure_helper()
+        cmd = self._ssh_prefix() + ["python3", self.helper_path]
+        log.info("DuckDbSshTransport executing on %s (%d chars)...",
+                  self.ssh, len(sql))
+        start = time.monotonic()
+        proc = subprocess.run(
+            cmd, input=sql.encode("utf-8"), capture_output=True, check=False,
+        )
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"ssh+duckdb failed (rc={proc.returncode}): {stderr[:500]}"
+            )
+        body = proc.stdout.decode("utf-8", errors="replace")
+        columns, rows = _parse_psql_csv(body)
+        log.info("DuckDbSshTransport returned %d rows (%dms).", len(rows), elapsed_ms)
+        return RawResult(columns=columns, rows=rows, elapsed_ms=elapsed_ms)
+
+
 def build_transport(
     db_config: Mapping[str, Any] | None = None,
     *,
@@ -176,6 +273,8 @@ def build_transport(
     pg_database: str = "postgres",
     wsl: bool = True,
     sudo: bool = True,
+    helper_path: str = "/home/ruan/_orch_duckdb.py",
+    threads: int = 8,
 ) -> Transport:
     """Return a transport based on the supplied arguments.
 
@@ -198,6 +297,12 @@ def build_transport(
             ssh=ssh, container=container,
             pg_user=pg_user, pg_database=pg_database,
             wsl=wsl, sudo=sudo,
+        )
+    if kind in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
+        if not ssh:
+            raise ValueError("DuckDbSshTransport requires `ssh` (host target).")
+        return DuckDbSshTransport(
+            ssh=ssh, helper_path=helper_path, wsl=wsl, threads=threads,
         )
     raise ValueError(f"Unknown transport: {kind!r}")
 
