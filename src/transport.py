@@ -95,7 +95,7 @@ class SshWslTransport:
     container; CSV output comes back over stdout.
 
     Args:
-        ssh: ssh target, e.g. ``adm@100.95.184.17``.
+        ssh: ssh target, e.g. ``user@host``.
         container: docker container name, e.g. ``pgduckdb``.
         pg_user: postgres user inside the container.
         pg_database: postgres database inside the container.
@@ -198,7 +198,7 @@ class DuckDbSshTransport:
     callers render the SQL before calling.
 
     Args:
-        ssh: ssh target, e.g. ``adm@100.95.184.17``.
+        ssh: ssh target, e.g. ``user@host``.
         helper_path: where the helper lands on the host.
         wsl: prepend ``wsl`` (host is Windows running WSL). Default True.
         threads: DuckDB thread count (``SET threads``).
@@ -207,7 +207,7 @@ class DuckDbSshTransport:
     name = "ssh+duckdb"
 
     def __init__(self, *, ssh: str,
-                 helper_path: str = "/home/ruan/_orch_duckdb.py",
+                 helper_path: str = "/tmp/_orch_duckdb.py",
                  wsl: bool = True,
                  threads: int = 8,
                  ssh_options: list[str] | None = None) -> None:
@@ -273,7 +273,7 @@ def build_transport(
     pg_database: str = "postgres",
     wsl: bool = True,
     sudo: bool = True,
-    helper_path: str = "/home/ruan/_orch_duckdb.py",
+    helper_path: str = "/tmp/_orch_duckdb.py",
     threads: int = 8,
 ) -> Transport:
     """Return a transport based on the supplied arguments.
