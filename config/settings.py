@@ -12,9 +12,9 @@ log = logging.getLogger(__name__)
 # as the target name. Multi-word fields (pg_user, pg_database, helper_path)
 # must appear before their single-word suffixes.
 _TARGET_FIELDS = sorted(
-    ["transport", "ssh", "container", "pg_user", "pg_database", "wsl", "sudo",
-     "dialect", "user", "password", "host", "port", "database", "service",
-     "helper_path", "threads", "ssh_options"],
+    ["transport", "ssh", "container", "pg_user", "pg_database", "ch_database",
+     "wsl", "sudo", "dialect", "user", "password", "host", "port", "database",
+     "service", "helper_path", "threads", "ssh_options"],
     key=len, reverse=True,
 )
 
