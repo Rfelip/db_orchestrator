@@ -224,6 +224,14 @@ def main():
         action="store_true",
         help="Kill the latest running background job."
     )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Run as a long-lived batch server: read line-delimited JSON "
+             "fetch requests from stdin, run each on a persistent per-target "
+             "connection, write the CSV + a JSON status line per request. "
+             "Connection REUSE — one process serves a whole report run."
+    )
 
     # Query mode (DQL only — no manifests needed)
     parser.add_argument(
@@ -264,6 +272,14 @@ def main():
     if args.kill:
         _kill_job()
         return
+
+    # Long-lived batch server — connection REUSE across a whole report run.
+    # Handled before any config load so it can run purely on named targets
+    # (each request carries its own --target; the target supplies transport +
+    # secrets, no default DB_* connection needed).
+    if args.serve:
+        from src.server import serve
+        sys.exit(serve())
 
     # Handle background spawn
     if args.bg:
