@@ -19,8 +19,7 @@ Wire protocol (line-delimited JSON, utf-8, one request/response per line):
 
     request   {"id": <int>, "sql_file": "<path>", "target": "<NAME>",
                "output": "<path>", "limit": <int|null>}
-    response  {"id": <int>, "ok": <bool>, "rows": <int>,
-               "error": "<str|null>", "missing_source": <bool>}
+    response  {"id": <int>, "ok": <bool>, "rows": <int>, "error": "<str|null>"}
 
 A ``{"id": ..., "cmd": "shutdown"}`` request makes the loop return cleanly.
 
@@ -28,7 +27,8 @@ The response carries the orchestrator's raw error string verbatim in
 `error` (truncated), so the client's existing transient/missing-source
 classification (`_TRANSIENT_FETCH_SIGNS` / `_MISSING_SOURCE_SIGNS`) keeps
 working unchanged: the server surfaces the SAME error signatures the
-subprocess path printed to stderr.
+subprocess path printed to stderr.  Classification is done entirely on the
+client by substring matching — the server does not duplicate that logic.
 """
 from __future__ import annotations
 
@@ -206,15 +206,13 @@ def _handle_request(req: dict, pool: TransportPool) -> dict:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", newline="", encoding="utf-8") as fh:
             result.to_csv(fh)
-        return {"id": rid, "ok": True, "rows": result.row_count,
-                "error": None, "missing_source": False}
+        return {"id": rid, "ok": True, "rows": result.row_count, "error": None}
     except Exception as exc:  # noqa: BLE001 — surface every failure as text
         # Surface the SAME string shape the subprocess path printed to
         # stderr ("ERROR: <msg>"), so the client's substring classification
         # (_TRANSIENT_FETCH_SIGNS / _MISSING_SOURCE_SIGNS) keeps matching.
         msg = f"ERROR: {exc}"
-        return {"id": rid, "ok": False, "rows": 0, "error": msg,
-                "missing_source": False}
+        return {"id": rid, "ok": False, "rows": 0, "error": msg}
 
 
 def serve(stdin: TextIO | None = None, stdout: TextIO | None = None,
@@ -244,8 +242,7 @@ def serve(stdin: TextIO | None = None, stdout: TextIO | None = None,
             except json.JSONDecodeError as exc:
                 stdout.write(json.dumps(
                     {"id": None, "ok": False, "rows": 0,
-                     "error": f"ERROR: bad request JSON: {exc}",
-                     "missing_source": False}) + "\n")
+                     "error": f"ERROR: bad request JSON: {exc}"}) + "\n")
                 stdout.flush()
                 continue
             if req.get("cmd") == "shutdown":

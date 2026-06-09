@@ -133,8 +133,7 @@ def test_serve_framing_and_reuse_over_pipes():
         # readiness handshake + 2 responses (shutdown produces none)
         assert json.loads(lines[0]) == {"ready": True}, lines[0]
         r1 = json.loads(lines[1]); r2 = json.loads(lines[2])
-        assert r1 == {"id": 1, "ok": True, "rows": 2, "error": None,
-                      "missing_source": False}, r1
+        assert r1 == {"id": 1, "ok": True, "rows": 2, "error": None}, r1
         assert r2["id"] == 2 and r2["ok"] is True
         # Both CSVs written, utf-8 preserved.
         body = o1.read_text(encoding="utf-8")
@@ -189,6 +188,38 @@ def test_malformed_json_line_yields_error_line():
         assert json.loads(lines[0]) == {"ready": True}
         bad = json.loads(lines[1])
         assert bad["ok"] is False and "bad request JSON" in bad["error"]
+        assert "missing_source" not in bad, "dead field must not appear in response"
+    finally:
+        os.unlink(path)
+
+
+def test_response_has_no_missing_source_field():
+    """Defect 4: missing_source is removed from the wire protocol — client
+    does classification by substring matching, not this server field."""
+    path = _make_db()
+    try:
+        sql_file = Path(tempfile.mkstemp(suffix=".sql")[1])
+        sql_file.write_text("SELECT id FROM t", encoding="utf-8")
+        out = Path(tempfile.mkdtemp()) / "out.csv"
+        resp = _handle_request(
+            {"id": 1, "sql_file": str(sql_file), "target": "LOCAL",
+             "output": str(out)},
+            _pool_for(path),
+        )
+        assert resp["ok"] is True
+        assert "missing_source" not in resp, (
+            f"missing_source must not appear in success response: {resp}"
+        )
+        # Verify error responses also lack the field.
+        err_resp = _handle_request(
+            {"id": 2, "sql_file": "/no/such/file.sql", "target": "LOCAL",
+             "output": str(out)},
+            _pool_for(path),
+        )
+        assert err_resp["ok"] is False
+        assert "missing_source" not in err_resp, (
+            f"missing_source must not appear in error response: {err_resp}"
+        )
     finally:
         os.unlink(path)
 
