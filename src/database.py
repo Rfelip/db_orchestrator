@@ -45,8 +45,23 @@ class DatabaseManager:
                 except ImportError:
                     log.warning("oracledb not installed, but oracle dialect used.")
 
+            # Fail fast on a connection that won't *establish* — a stalled TCP
+            # setup (e.g. ephemeral-port exhaustion through the comp20 LAN
+            # portproxy under fetch churn) otherwise hangs the whole subprocess
+            # until the caller's wall-timeout. A short connect_timeout turns that
+            # into a quick, retryable error WITHOUT capping how long an already-
+            # established query may run. psycopg2/libpq only — Oracle's thin/thick
+            # client ignores it and would reject the unknown kwarg.
+            connect_args = {}
+            if 'postgres' in self.db_url or 'psycopg2' in self.db_url:
+                connect_args['connect_timeout'] = int(
+                    os.environ.get('DB_CONNECT_TIMEOUT', '10')
+                )
+
             # pool_pre_ping=True helps recover from stale connections
-            self.engine = create_engine(self.db_url, pool_pre_ping=True)
+            self.engine = create_engine(
+                self.db_url, pool_pre_ping=True, connect_args=connect_args
+            )
             self.Session = scoped_session(sessionmaker(bind=self.engine))
             log.info("Database engine initialized.")
         except Exception as e:
