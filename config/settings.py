@@ -43,6 +43,22 @@ def load_targets() -> dict[str, dict[str, str]]:
             continue
         name, field = m.group(1), m.group(2).lower()
         targets.setdefault(name, {})[field] = env_val
+
+    # Single-source shorthand: `DATA_SOURCE=<host>` (+ DATA_USER/DATA_PASSWORD)
+    # synthesizes the Oracle MR2 digest target with sane defaults, so a consumer
+    # configures one IP + credentials instead of the full DB_TARGET_MR2_* block.
+    # An explicit DB_TARGET_MR2_* in the env still wins (already in `targets`).
+    src = os.getenv("DATA_SOURCE")
+    if src and "MR2" not in targets:
+        targets["MR2"] = {
+            "transport": "direct",
+            "dialect": "oracle+oracledb",
+            "host": src,
+            "port": os.getenv("DATA_PORT", "1521"),
+            "service": os.getenv("DATA_SERVICE", "tabuas"),
+            "user": os.getenv("DATA_USER", "RUAN_F"),
+            "password": os.getenv("DATA_PASSWORD", ""),
+        }
     return targets
 
 def load_settings():
