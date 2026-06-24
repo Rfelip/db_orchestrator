@@ -6,7 +6,34 @@ import logging
 log = logging.getLogger(__name__)
 
 
-_TARGET_KEY_RE = re.compile(r"^DB_TARGET_([A-Z0-9_]+)_([A-Z0-9_]+)$")
+# Known target fields, longest first. A greedy `NAME_FIELD` split can't tell
+# `MR3_PG_DATABASE` (target MR3, field pg_database) from `MR3_PG` + `DATABASE`,
+# so we match the longest known field that the key ends with and treat the rest
+# as the target name. Multi-word fields (pg_user, pg_database, helper_path)
+# must appear before their single-word suffixes.
+_TARGET_FIELDS = sorted(
+    ["transport", "ssh", "container", "pg_user", "pg_database", "ch_database",
+     "wsl", "sudo", "dialect", "user", "password", "host", "port", "database",
+     "service", "helper_path", "threads", "ssh_options"],
+    key=len, reverse=True,
+)
+
+
+def _split_target_key(env_key: str) -> tuple[str, str] | None:
+    """`DB_TARGET_<NAME>_<FIELD>` → (name, field), matching the longest known
+    field suffix so multi-word fields parse correctly. Falls back to the last
+    underscore for unknown fields."""
+    if not env_key.startswith("DB_TARGET_"):
+        return None
+    rest = env_key[len("DB_TARGET_"):]
+    low = rest.lower()
+    for field in _TARGET_FIELDS:
+        if low.endswith("_" + field):
+            return rest[: len(rest) - len(field) - 1], field
+    i = rest.rfind("_")
+    if i <= 0:
+        return None
+    return rest[:i], rest[i + 1:].lower()
 
 
 def load_targets() -> dict[str, dict[str, str]]:
@@ -19,13 +46,13 @@ def load_targets() -> dict[str, dict[str, str]]:
         DB_TARGET_MR3_SSH=user@host
         DB_TARGET_MR3_CONTAINER=pgduckdb
         DB_TARGET_MR3_PG_USER=postgres
-        DB_TARGET_MR3_PG_DATABASE=your_database_name
+        DB_TARGET_MR3_PG_DATABASE=my_db
 
     Resolves to:
 
         {"MR3": {"transport": "ssh+wsl", "ssh": "user@host",
                   "container": "pgduckdb", "pg_user": "postgres",
-                  "pg_database": "your_database_name"}}
+                  "pg_database": "my_db"}}
 
     The keys are lowercased so callers pass them as `run_sql` kwargs
     directly. Caller usage:
@@ -38,10 +65,12 @@ def load_targets() -> dict[str, dict[str, str]]:
     load_dotenv(find_dotenv(usecwd=True), override=True)
     targets: dict[str, dict[str, str]] = {}
     for env_key, env_val in os.environ.items():
-        m = _TARGET_KEY_RE.match(env_key)
-        if not m or env_val == "":
+        if env_val == "":
             continue
-        name, field = m.group(1), m.group(2).lower()
+        split = _split_target_key(env_key)
+        if split is None:
+            continue
+        name, field = split
         targets.setdefault(name, {})[field] = env_val
 
     # Single-source shorthand: `DATA_SOURCE=<host>` (+ DATA_USER/DATA_PASSWORD)

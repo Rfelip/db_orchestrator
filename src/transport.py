@@ -166,6 +166,210 @@ class SshWslTransport:
         return ssh_part + wrapper + docker_part
 
 
+_DUCKDB_HELPER = '''\
+import csv, sys, duckdb
+con = duckdb.connect()
+con.execute("SET threads=%d")
+sql = sys.stdin.read().strip().rstrip(";")
+cur = con.execute(sql)
+cols = [d[0].lower() for d in cur.description]
+w = csv.writer(sys.stdout, lineterminator="\\n")
+w.writerow(cols)
+for row in cur.fetchall():
+    w.writerow(row)
+'''
+"""Remote program for `DuckDbSshTransport`: reads SQL from stdin, runs it
+through DuckDB on the remote host, writes CSV (lowercased headers) to
+stdout. Uploaded to the host once per process."""
+
+
+class DuckDbSshTransport:
+    """Run DuckDB SQL on a remote host via `ssh [wsl] python3 <helper>`.
+
+    The companion of `SshWslTransport`: where that one reaches a
+    containerised Postgres, this one reaches **DuckDB running directly on
+    the host**, so queries that read on-disk parquet trees
+    (`read_parquet([...])`, `glob()`, `filename=true`, `strftime`,
+    `hash`) work — the full DuckDB dialect, which pgduckdb-in-Postgres
+    does not expose.
+
+    The helper script is shipped to `helper_path` on first use (idempotent,
+    once per process) and invoked with the SQL on stdin. No bind params:
+    callers render the SQL before calling.
+
+    Args:
+        ssh: ssh target, e.g. ``user@host``.
+        helper_path: where the helper lands on the host.
+        wsl: prepend ``wsl`` (host is Windows running WSL). Default True.
+        threads: DuckDB thread count (``SET threads``).
+    """
+
+    name = "ssh+duckdb"
+
+    def __init__(self, *, ssh: str,
+                 helper_path: str = "/tmp/_orch_duckdb.py",
+                 wsl: bool = True,
+                 threads: int = 8,
+                 ssh_options: list[str] | None = None) -> None:
+        self.ssh = ssh
+        self.helper_path = helper_path
+        self.wsl = wsl
+        self.threads = threads
+        self.ssh_options = list(ssh_options or [])
+        self._helper_synced = False
+
+    def _ssh_prefix(self) -> list[str]:
+        return ["ssh"] + self.ssh_options + [self.ssh] + (["wsl"] if self.wsl else [])
+
+    def _ensure_helper(self) -> None:
+        if self._helper_synced:
+            return
+        body = (_DUCKDB_HELPER % self.threads).encode("utf-8")
+        proc = subprocess.run(
+            self._ssh_prefix() + ["tee", self.helper_path],
+            input=body, capture_output=True, check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"failed to upload duckdb helper to {self.ssh}:{self.helper_path} "
+                f"(rc={proc.returncode}): {proc.stderr.decode('utf-8', 'replace')[:300]}"
+            )
+        self._helper_synced = True
+
+    def execute(self, sql: str,
+                 params: Mapping[str, Any] | None = None) -> RawResult:
+        if params:
+            raise NotImplementedError(
+                "DuckDbSshTransport does not support :name bind params. "
+                "Render the SQL before calling execute()."
+            )
+        self._ensure_helper()
+        cmd = self._ssh_prefix() + ["python3", self.helper_path]
+        log.info("DuckDbSshTransport executing on %s (%d chars)...",
+                  self.ssh, len(sql))
+        start = time.monotonic()
+        proc = subprocess.run(
+            cmd, input=sql.encode("utf-8"), capture_output=True, check=False,
+        )
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"ssh+duckdb failed (rc={proc.returncode}): {stderr[:500]}"
+            )
+        body = proc.stdout.decode("utf-8", errors="replace")
+        columns, rows = _parse_psql_csv(body)
+        log.info("DuckDbSshTransport returned %d rows (%dms).", len(rows), elapsed_ms)
+        return RawResult(columns=columns, rows=rows, elapsed_ms=elapsed_ms)
+
+
+class ClickHouseSshTransport:
+    """Run ClickHouse SQL on a remote machine via `ssh + wsl docker exec
+    clickhouse-client`.
+
+    The ClickHouse sibling of `SshWslTransport`: same `ssh + [wsl]
+    [sudo] docker exec -i <container>` envelope, but the in-container
+    program is `clickhouse-client` instead of `psql`. SQL ships over
+    stdin; results come back as CSV with a header row
+    (`--format CSVWithNames`), so the existing `_parse_psql_csv` helper
+    parses them unchanged.
+
+    Performance settings that matter for the LabMA biometric tables
+    (large GROUP BY / JOIN over hundreds of millions of CNIS rows) are
+    exposed as constructor params and passed as `--<setting>=<value>`
+    flags. Defaults are sized for the MR3 rig (~27 GB host RAM).
+
+    Args:
+        ssh: ssh target, e.g. ``user@host``.
+        container: docker container name, e.g. ``clickhouse-tabua``.
+        ch_database: ClickHouse database to connect to (``-d <db>``).
+            Optional — leave None to qualify tables in the SQL instead
+            (``SELECT … FROM mydb.mytable``) or rely on ``USE``.
+        wsl: prepend ``wsl`` (i.e. host is Windows running WSL). Default
+            True since that's the only deployment we have so far.
+        sudo: prepend ``sudo`` to docker (rootful docker installs).
+        max_threads: ClickHouse ``max_threads`` setting.
+        max_bytes_before_external_group_by: spill threshold for GROUP BY.
+        join_algorithm: ClickHouse ``join_algorithm`` (e.g.
+            ``grace_hash`` to spill large joins to disk).
+        max_memory_usage: per-query memory ceiling in bytes.
+        ssh_options: extra ssh options as a list of `-o KEY=VALUE`
+            strings. Empty list by default.
+    """
+
+    name = "ssh+clickhouse"
+
+    def __init__(self, *, ssh: str, container: str,
+                 ch_database: str | None = None,
+                 wsl: bool = True,
+                 sudo: bool = True,
+                 max_threads: int = 4,
+                 max_bytes_before_external_group_by: int = 2_000_000_000,
+                 join_algorithm: str = "grace_hash",
+                 max_memory_usage: int = 22_000_000_000,
+                 ssh_options: list[str] | None = None) -> None:
+        self.ssh = ssh
+        self.container = container
+        self.ch_database = ch_database
+        self.wsl = wsl
+        self.sudo = sudo
+        self.max_threads = max_threads
+        self.max_bytes_before_external_group_by = max_bytes_before_external_group_by
+        self.join_algorithm = join_algorithm
+        self.max_memory_usage = max_memory_usage
+        self.ssh_options = list(ssh_options or [])
+
+    def execute(self, sql: str,
+                 params: Mapping[str, Any] | None = None) -> RawResult:
+        if params:
+            raise NotImplementedError(
+                "ClickHouseSshTransport does not support :name bind params. "
+                "Render the SQL before calling execute()."
+            )
+        cmd = self._build_command()
+        log.info("ClickHouseSshTransport executing on %s/%s (%d chars)...",
+                  self.ssh, self.container, len(sql))
+        start = time.monotonic()
+        proc = subprocess.run(
+            cmd,
+            input=sql.encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"ssh+clickhouse clickhouse-client failed "
+                f"(rc={proc.returncode}): {stderr[:500]}"
+            )
+        body = proc.stdout.decode("utf-8", errors="replace")
+        columns, rows = _parse_psql_csv(body)
+        log.info("ClickHouseSshTransport returned %d rows (%dms).",
+                  len(rows), elapsed_ms)
+        return RawResult(columns=columns, rows=rows, elapsed_ms=elapsed_ms)
+
+    def _build_command(self) -> list[str]:
+        ssh_part = ["ssh"] + self.ssh_options + [self.ssh]
+        wrapper = ["wsl"] if self.wsl else []
+        client = [
+            "clickhouse-client",
+            "--format", "CSVWithNames",
+            "--multiquery",
+            f"--max_threads={self.max_threads}",
+            "--max_bytes_before_external_group_by="
+            f"{self.max_bytes_before_external_group_by}",
+            f"--join_algorithm={self.join_algorithm}",
+            f"--max_memory_usage={self.max_memory_usage}",
+        ]
+        if self.ch_database:
+            client += ["-d", self.ch_database]
+        docker_part = (["sudo"] if self.sudo else []) + [
+            "docker", "exec", "-i", self.container,
+        ] + client
+        return ssh_part + wrapper + docker_part
+
+
 def build_transport(
     db_config: Mapping[str, Any] | None = None,
     *,
@@ -174,8 +378,11 @@ def build_transport(
     container: str | None = None,
     pg_user: str = "postgres",
     pg_database: str = "postgres",
+    ch_database: str | None = None,
     wsl: bool = True,
     sudo: bool = True,
+    helper_path: str = "/tmp/_orch_duckdb.py",
+    threads: int = 8,
 ) -> Transport:
     """Return a transport based on the supplied arguments.
 
@@ -197,6 +404,22 @@ def build_transport(
         return SshWslTransport(
             ssh=ssh, container=container,
             pg_user=pg_user, pg_database=pg_database,
+            wsl=wsl, sudo=sudo,
+        )
+    if kind in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
+        if not ssh:
+            raise ValueError("DuckDbSshTransport requires `ssh` (host target).")
+        return DuckDbSshTransport(
+            ssh=ssh, helper_path=helper_path, wsl=wsl, threads=threads,
+        )
+    if kind in ("ssh+clickhouse", "ssh_clickhouse", "clickhouse+ssh"):
+        if not ssh or not container:
+            raise ValueError(
+                "ClickHouseSshTransport requires `ssh` (host target) and "
+                "`container` (docker container name)."
+            )
+        return ClickHouseSshTransport(
+            ssh=ssh, container=container, ch_database=ch_database,
             wsl=wsl, sudo=sudo,
         )
     raise ValueError(f"Unknown transport: {kind!r}")

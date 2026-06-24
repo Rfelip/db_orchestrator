@@ -148,8 +148,11 @@ def run_sql(
     container: str | None = None,
     pg_user: str = "postgres",
     pg_database: str = "postgres",
+    ch_database: str | None = None,
     wsl: bool = True,
     sudo: bool = True,
+    helper_path: str = "/tmp/_orch_duckdb.py",
+    threads: int = 8,
     params: Mapping[str, Any] | None = None,
     limit: int | None = None,
     dql_only: bool = False,
@@ -177,11 +180,14 @@ def run_sql(
         db_config: Required for the direct transport. Optional for
             ssh+wsl (some callers may want to pass it for context only;
             the transport itself uses its own dispatch).
-        transport: ``'direct'`` (default), ``'ssh+wsl'``, or a
-            pre-built `Transport` instance.
-        ssh, container, pg_user, pg_database, wsl, sudo: SshWslTransport
-            constructor arguments. Ignored when `transport` is a
-            constructed `Transport` instance or `'direct'`.
+        transport: ``'direct'`` (default), ``'ssh+wsl'``,
+            ``'ssh+duckdb'``, ``'ssh+clickhouse'``, or a pre-built
+            `Transport` instance.
+        ssh, container, pg_user, pg_database, ch_database, wsl, sudo:
+            ssh-transport constructor arguments (`ch_database` is the
+            ClickHouse default database for ``ssh+clickhouse``). Ignored
+            when `transport` is a constructed `Transport` instance or
+            `'direct'`.
         params: Optional bind parameters for the direct transport.
         limit: Optional row cap; wraps the SQL in a dialect-appropriate
             limiter before execution (direct only — ssh+wsl callers
@@ -228,6 +234,17 @@ def run_sql(
                 "database": cfg.get("database"),
                 "service": cfg.get("service"),
             }
+        elif transport in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
+            ssh = cfg["ssh"]
+            wsl = _coerce_bool(cfg.get("wsl", True))
+            helper_path = cfg.get("helper_path", "/tmp/_orch_duckdb.py")
+            threads = int(cfg.get("threads", 8))
+        elif transport in ("ssh+clickhouse", "ssh_clickhouse", "clickhouse+ssh"):
+            ssh = cfg["ssh"]
+            container = cfg["container"]
+            ch_database = cfg.get("ch_database")
+            wsl = _coerce_bool(cfg.get("wsl", True))
+            sudo = _coerce_bool(cfg.get("sudo", True))
         else:
             ssh = cfg["ssh"]
             container = cfg["container"]
@@ -254,7 +271,9 @@ def run_sql(
             transport=transport,
             ssh=ssh, container=container,
             pg_user=pg_user, pg_database=pg_database,
+            ch_database=ch_database,
             wsl=wsl, sudo=sudo,
+            helper_path=helper_path, threads=threads,
         )
     else:
         tp = transport  # already a Transport instance
