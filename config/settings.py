@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 _TARGET_FIELDS = sorted(
     ["transport", "ssh", "container", "pg_user", "pg_database", "ch_database",
      "wsl", "sudo", "dialect", "user", "password", "host", "port", "database",
-     "service", "helper_path", "threads", "ssh_options"],
+     "service", "helper_path", "threads", "ssh_options", "python"],
     key=len, reverse=True,
 )
 

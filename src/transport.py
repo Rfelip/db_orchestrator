@@ -210,11 +210,17 @@ class DuckDbSshTransport:
                  helper_path: str = "/tmp/_orch_duckdb.py",
                  wsl: bool = True,
                  threads: int = 8,
+                 python: str = "python3",
                  ssh_options: list[str] | None = None) -> None:
         self.ssh = ssh
         self.helper_path = helper_path
         self.wsl = wsl
         self.threads = threads
+        # The helper needs a `duckdb` import, which a host's *system* python
+        # often lacks while a project venv on the same host has it. Naming the
+        # interpreter is the difference between "this host can't run DuckDB"
+        # and "point at the venv that already can".
+        self.python = python
         self.ssh_options = list(ssh_options or [])
         self._helper_synced = False
 
@@ -244,7 +250,7 @@ class DuckDbSshTransport:
                 "Render the SQL before calling execute()."
             )
         self._ensure_helper()
-        cmd = self._ssh_prefix() + ["python3", self.helper_path]
+        cmd = self._ssh_prefix() + [self.python, self.helper_path]
         log.info("DuckDbSshTransport executing on %s (%d chars)...",
                   self.ssh, len(sql))
         start = time.monotonic()
@@ -383,6 +389,7 @@ def build_transport(
     sudo: bool = True,
     helper_path: str = "/tmp/_orch_duckdb.py",
     threads: int = 8,
+    python: str = "python3",
 ) -> Transport:
     """Return a transport based on the supplied arguments.
 
@@ -411,6 +418,7 @@ def build_transport(
             raise ValueError("DuckDbSshTransport requires `ssh` (host target).")
         return DuckDbSshTransport(
             ssh=ssh, helper_path=helper_path, wsl=wsl, threads=threads,
+            python=python,
         )
     if kind in ("ssh+clickhouse", "ssh_clickhouse", "clickhouse+ssh"):
         if not ssh or not container:

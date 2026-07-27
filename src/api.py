@@ -153,6 +153,7 @@ def run_sql(
     sudo: bool = True,
     helper_path: str = "/tmp/_orch_duckdb.py",
     threads: int = 8,
+    python: str = "python3",
     params: Mapping[str, Any] | None = None,
     limit: int | None = None,
     dql_only: bool = False,
@@ -239,6 +240,7 @@ def run_sql(
             wsl = _coerce_bool(cfg.get("wsl", True))
             helper_path = cfg.get("helper_path", "/tmp/_orch_duckdb.py")
             threads = int(cfg.get("threads", 8))
+            python = cfg.get("python", "python3")
         elif transport in ("ssh+clickhouse", "ssh_clickhouse", "clickhouse+ssh"):
             ssh = cfg["ssh"]
             container = cfg["container"]
@@ -274,6 +276,7 @@ def run_sql(
             ch_database=ch_database,
             wsl=wsl, sudo=sudo,
             helper_path=helper_path, threads=threads,
+            python=python,
         )
     else:
         tp = transport  # already a Transport instance
