@@ -1,7 +1,30 @@
-SQLAlchemy
-python-dotenv
-ruamel.yaml
-Jinja2
-requests
-oracledb
-psycopg2-binary
+# Runtime dependencies. Floors are the versions resolved 2026-07-30 and
+# are security floors, not preferences: this repo shares requests /
+# oracledb / python-dotenv with the parent `scripts_tabua`, which pinned
+# everything in `uv.lock` to close 39 CVEs. Left unpinned here, an
+# install of this submodule alone could still pull a vulnerable build.
+#
+# Upper bounds are majors, so patch and minor security releases still
+# flow in without an edit.
+
+SQLAlchemy>=2.0.51,<3
+python-dotenv>=1.2.2,<2
+ruamel.yaml>=0.19.1,<0.20
+Jinja2>=3.1.6,<4
+requests>=2.34.2,<3
+oracledb>=4.0.2,<5
+psycopg2-binary>=2.9.12,<3
+
+# Transitive, floored on purpose. These arrive via requests (urllib3,
+# idna, certifi), oracledb (cryptography) and Jinja2 (MarkupSafe) — the
+# packages the parent's CVE sweep turned up. Naming them here is what
+# stops a standalone install of this repo from resolving an old one.
+urllib3>=2.7.0,<3
+idna>=3.18,<4
+certifi>=2026.7.22
+cryptography>=49.0.0,<50
+MarkupSafe>=3.0.3,<4
+
+# NOT here on purpose: duckdb. The orchestrator never imports it — the
+# REMOTE host runs it, reached over ssh. It is a test-only dependency and
+# lives in requirements-dev.txt.

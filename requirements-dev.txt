@@ -1,0 +1,13 @@
+# Test-only dependencies. Separate file rather than a comment in
+# requirements.txt, so the distinction survives contact with an installer.
+-r requirements.txt
+
+pytest>=9.1.1,<10
+
+# duckdb is TEST-ONLY. No module under src/ imports it: a `ssh+duckdb`
+# target runs DuckDB on the REMOTE host, and this side only speaks the
+# session protocol over ssh. The tests need it because they prove session
+# semantics against a real engine instead of a mock — and without it those
+# tests `importorskip` away, so a suite run reports green while skipping
+# the part that matters.
+duckdb>=1.5.5,<2
