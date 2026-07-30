@@ -234,11 +234,17 @@ def format_resume_banner(
         f"ledger {run_id}: {len(decision.skip)} of {total} planned steps "
         f"proven complete.",
         f"  verified on disk : {verified} (declared `produces:` still present)",
-        f"  NOT verified     : {len(decision.unverified)} (no `produces:` declared "
-        f"— resume is TRUSTING",
-        "                     their outputs are still on disk and still valid. "
-        "Nothing checked that.)",
+        f"  NOT verified     : {len(decision.unverified)}",
     ]
+    # The caveat only when there is something to caveat: printing it at
+    # zero would train the reader to skip the line that matters.
+    if decision.unverified:
+        lines += [
+            "                     ^ these declared no `produces:`, so resume is "
+            "TRUSTING that",
+            "                       their outputs are still on disk and still "
+            "valid. Nothing checked.",
+        ]
     if decision.start_at is None:
         lines.append("  Nothing left to run: every planned step is already complete.")
     else:

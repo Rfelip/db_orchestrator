@@ -11,7 +11,8 @@ execution-plan capture, and notifications to Discord and Telegram.
 ### As a CLI
 
 ```bash
-# Install dependencies
+# Install dependencies (add -r requirements-dev.txt to run the tests —
+# duckdb is test-only, the orchestrator never imports it)
 uv pip install -r requirements.txt
 
 # Configure environment (see below)
@@ -171,11 +172,105 @@ An axis that is also set in `params` is an error, not an override. The
 unknown-key check is unchanged: `foreach` widens the schema by exactly
 one key.
 
-**Limitation:** expanded step names exist nowhere in the source YAML, so
-`disable_step` cannot match them. A `foreach` manifest is never
-rewritten (good — it is hand-written source) but it is also not
-resumable through the `enabled: false` mechanism. The loader logs a
-warning when it expands anything.
+Expanded step names exist nowhere in the source YAML, so `disable_step`
+cannot match them and a `foreach` manifest is never rewritten — good, it
+is hand-written source. Resume for expanded steps is the run ledger
+below, which works off the expanded plan instead of the file.
+
+## Resume
+
+A 345-step pipeline that dies at step 300 must not cost you steps 1–299.
+Two mechanisms, answering different questions.
+
+### `--resume` — where it broke
+
+Every completed step appends a line to
+`<plan-dir>/<run_id>/ledger.jsonl` as the run goes (flushed per line, so
+it survives the crash that made it necessary). A later run reads it back
+and skips what it proves is done.
+
+```bash
+# The run that failed at step 300 of 345.
+python main.py --manifest manifests/gerados/manifest_pipeline.yaml \
+               --target MR3DUCK --force
+
+# What can be resumed from.
+python main.py --resume list
+
+# Pick up where it stopped. 'last' is the most recent run.
+python main.py --manifest manifests/gerados/manifest_pipeline.yaml \
+               --target MR3DUCK --force --enable-all --resume last
+```
+
+It prints what it is doing, and what it could not check, before running
+anything:
+
+```
+--- Resume ---
+ledger 20260730T101500: 299 of 345 planned steps proven complete.
+  verified on disk : 144 (declared `produces:` still present)
+  NOT verified     : 155
+                     ^ these declared no `produces:`, so resume is TRUSTING that
+                       their outputs are still on disk and still valid. Nothing checked.
+  Resuming at      : qx_bkt03_year2019
+  Because          : it is not recorded as completed in the ledger
+```
+
+A step is skipped only if the ledger has it **and** its SQL and params
+still hash the same **and** its declared output is still there. The skip
+list is a *prefix*: the first step that fails any check is the resume
+point, and everything after it runs too.
+
+`--enable-all` is the recommended pairing. Auto-disable (`enabled: false`
+written back to the YAML) and the ledger both record "done", and only the
+ledger sees expanded names; `--enable-all` makes the ledger the single
+authority instead of two half-authorities.
+
+Resuming a resumed run works: the new ledger inherits the old entries, so
+a second failure does not cost the first run's work.
+
+### `produces:` — what resume is allowed to check
+
+The ledger knows a step *finished*. It cannot know its output survived.
+`produces:` closes that gap where you declare it — a path template
+rendered with the step's params, so each `foreach` expansion gets its own:
+
+```yaml
+  - name: qx
+    type: sql
+    file: "05 - Tabuas/03 - qx.sql"
+    params: { out: /mnt/lake }
+    produces: "{{ out }}/tabuas/qx_bkt{{ bkt }}_{{ year }}.parquet"
+    foreach:
+      bkt: [0, 1, 2, 3]
+      year: [2019, 2020]
+```
+
+Delete `qx_bkt02_2019.parquet` and resume: that step and everything after
+it re-runs. Without `produces:`, resume skips the step and says so in the
+banner rather than implying it checked. `produces:` checks existence, not
+contents — a truncated file from a killed writer still passes.
+
+### `--from` / `--until` — just this part
+
+Substring match over the **expanded** plan, the ergonomics the old
+`scripts/run_pipeline.py` had:
+
+```bash
+python main.py --target MR3DUCK --force --from qx_bkt03_year2019
+python main.py --target MR3DUCK --force --from qx_ --until qx_bkt15_year2025
+```
+
+`--from` takes the first matching step, `--until` the last, inclusive —
+so `--until qx_bkt03` runs the whole `qx_bkt03_*` group. A substring that
+matches nothing is an error, not a full run.
+
+The two compose: the window is what you asked to run, and the ledger only
+removes work from inside it.
+
+`--no-ledger` opts out of recording (the run is then not resumable).
+Ledgers live beside captured plans under `--plan-dir` — one run id, one
+directory, what ran and what it cost.
 
 ## Execution plans
 
@@ -300,6 +395,7 @@ db_orchestrator/
 │   ├── transport.py         # How SQL reaches a DB + DuckDbSettings
 │   ├── duckdb_session.py    # Persistent remote DuckDB session
 │   ├── plans.py             # Plan capture, storage, and summary
+│   ├── ledger.py            # Run ledger + resume decision + --from/--until
 │   ├── types.py             # Step / ManifestConfig, foreach expansion
 │   ├── parser.py            # SQL file reading
 │   ├── notifier.py          # Discord webhook notifications
@@ -347,6 +443,6 @@ steps:
 ## Key Behaviors
 
 - **Transaction groups:** Consecutive SQL steps with the same `transaction_group` ID share a single DB transaction. Commit happens when the group changes or a Python step runs.
-- **Auto-disable:** Completed steps get `enabled: false` written back to the manifest (preserves YAML comments).
+- **Auto-disable:** Completed steps get `enabled: false` written back to the manifest (preserves YAML comments). Only steps whose names appear in the YAML — `foreach` expansions are covered by the run ledger instead, see **Resume**.
 - **Retries:** SQL steps retry up to 3 times with exponential backoff on failure.
 - **Profiling:** Oracle (AWR/ASH) and PostgreSQL (EXPLAIN) profiling is automatic when available. Results go to `reports/`.

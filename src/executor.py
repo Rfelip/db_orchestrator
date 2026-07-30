@@ -304,8 +304,17 @@ class Executor:
         banner = format_resume_banner(
             decision, total=len(window), run_id=self.resume.source_run_id
         )
+        # Printed in full, logged as one line: the logger already echoes to
+        # the console, and the banner twice on screen is the banner ignored.
         print(f"\n{banner}\n")
-        log.warning(banner)
+        log.info(
+            "resume from %s: skipping %d/%d steps (%d unverified), starting at %s",
+            self.resume.source_run_id,
+            len(decision.skip),
+            len(window),
+            len(decision.unverified),
+            decision.start_at,
+        )
         skipped = set(decision.skip)
         return [s for s in window if s.name not in skipped]
 

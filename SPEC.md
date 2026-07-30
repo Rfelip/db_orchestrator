@@ -57,24 +57,115 @@ Four deliverables, in the brief's words:
 
 ## Known gaps
 
-- **`foreach` steps are never auto-disabled.** `YamlManager.disable_step` matches
-  by name; expanded names (`load_bkt00`) do not exist in the source YAML, so the
-  call is a logged no-op. This is *safe* (a hand-written manifest is never
-  rewritten) but it means a `foreach` manifest is not resumable by the
-  `enabled: false` mechanism. `ManifestConfig.from_dict` logs a warning when it
-  expands anything.
+*(Both gaps recorded here on 2026-07-30 were closed the same day — see
+"Resume" below and `requirements-dev.txt`. Kept for the record.)*
 
-- **`duckdb` is a test-only dependency and is not in `requirements.txt`.** The
-  orchestrator never imports it — the *remote* host does. But the 27 tests that
-  prove session semantics `importorskip` it, so a suite run without it reports
-  green while skipping the part that matters. Run them with:
+- ~~**`foreach` steps are never auto-disabled.**~~ Closed by the run ledger.
+  `YamlManager.disable_step` still matches by name and still cannot see expanded
+  names — that has not changed and does not need to. Resume for expanded steps
+  is `--resume`, which works off the expanded plan.
+
+- ~~**`duckdb` is a test-only dependency and is not in `requirements.txt`.**~~
+  Now in `requirements-dev.txt`, which is the same statement made structurally.
 
   ```sh
   uv run --with pytest --with sqlalchemy --with python-dotenv --with ruamel.yaml \
          --with jinja2 --with requests --with duckdb python -m pytest tests -q
   ```
 
+# SPEC — resume
+
+**Status:** implemented 2026-07-30. The 345-step tábua pipeline takes ~30 min on
+a shared machine; a failure at step 300 must not cost steps 1–299.
+
+## Intent
+
+Make a manifest run resumable, including for `foreach`-expanded steps, without
+hand-editing any generated file — and be honest about the one thing resume
+cannot check.
+
+Two mechanisms, because they answer different questions:
+
+| Mechanism | Question | Where |
+|---|---|---|
+| **Run ledger** | *"resume where it broke"* | `<plan_dir>/<run_id>/ledger.jsonl`, `--resume` |
+| **Window selector** | *"just run this part"* | `--from` / `--until`, substring over the expanded plan |
+
+`--from` restores the ergonomics of the pre-existing `scripts/run_pipeline.py`
+in the parent repo. The ledger is what that runner never had.
+
+## Inputs / outputs
+
+| Boundary | In | Out |
+|---|---|---|
+| `select_window` | expanded step names + `start`/`until` substrings | half-open index range, or `NoStepMatchedError` |
+| `decide_resume` | `StepCheck` per planned step + ledger entries by name | `ResumeDecision` (skip prefix, unverified, resume point, reason) |
+| `RunLedger.record` | step name, source sha, rendered `produces`, seconds | one flushed `ledger.jsonl` line |
+| `load_resume_request` | `ResumeOptions` | `ResumeRequest` with the prior ledger loaded, or `LedgerNotFoundError` |
+| `Step.from_dict` | a step mapping that may carry `produces:` | `Step` with `produces` unrendered |
+
+## Invariants
+
+- **Prefix, not set.** The skip list is the longest *prefix* of the plan the
+  ledger proves is done. The first step that fails a check is the resume point;
+  everything from there runs, even if the ledger lists it. Whatever invalidated
+  a step probably invalidated its successors.
+- **A step is only skipped if it is unchanged.** `source_sha` covers the SQL
+  file bytes *and* the step's params, so an edited query or a changed `foreach`
+  value re-runs.
+- **Declared outputs are checked; undeclared ones are declared unchecked.** A
+  step with `produces:` whose file is gone is not skipped. A step without
+  `produces:` is skipped and counted into `ResumeDecision.unverified`, which
+  `format_resume_banner` prints at the point of use with the word TRUSTING. The
+  gap is surfaced, never silent.
+- **Chaining works.** A resumed run's ledger *inherits* the prior entries
+  (keeping their original `run_id`), so resuming a resumed run still knows about
+  the first run's work.
+- **A mistyped selector fails.** `--from`/`--until` matching nothing raises
+  rather than degrading into a 345-step run. Same for an unknown `--resume` id.
+- **Ledger writes never fail a run.** An `OSError` writing the ledger logs a
+  warning; it costs a resume, not a result.
+- **Backward compatibility.** `ledger` and `resume` default to `None` on both
+  `Executor` and `run_manifest`. Oracle / Postgres manifest execution and the
+  DuckDB session path are unchanged when they are not passed.
+
+## Non-goals
+
+- Running the tábua pipeline. MR3 is shared.
+- Replacing `disable_step`. The two compose; see "Interaction" below.
+- A dependency graph. Resume is positional, because manifest execution is
+  sequential.
+- Verifying output *contents*. `produces:` checks existence. A truncated
+  parquet from a killed writer passes — the ledger is a resume aid, not a
+  validator.
+
+## Interaction with `disable_step` and with `carga_runs`
+
+`disable_step` writes `enabled: false` into the source YAML for steps it can
+find by name; the ledger records every completed step including expanded ones.
+They overlap for hand-written steps and only the ledger covers expanded ones.
+**Pair `--resume` with `--enable-all`** when you want the ledger to be the sole
+authority — otherwise a step already disabled in the YAML never reaches the
+resume logic, so a vanished output for that step cannot be detected.
+
+`carga_runs` (parent ADR-0004) is *not* this ledger and this is not a
+duplicate of it: that is one row per **published dataset** in Postgres, carrying
+git SHA and an Iceberg snapshot; this is hundreds of lines per run on local
+disk, alive only until the run succeeds. They meet at the run id — the id minted
+here is an id a `carga_runs` row can reference.
+
 ## Success criteria
+
+- Full suite green before and after (202 → 252).
+- A test proves an interrupted run resumes at the failed step.
+- A test proves a resumed run does not re-execute a completed step (output
+  mtime unchanged).
+- A test proves a deleted declared output forces that step *and everything after
+  it* to re-run.
+- A test proves that with no `produces:` anywhere, resume skips everything and
+  says out loud that it verified nothing.
+
+# SPEC — native-DuckDB success criteria (original)
 
 - Full suite green before and after.
 - A test proves `TEMP TABLE` survives across `run()` calls against a **real**
