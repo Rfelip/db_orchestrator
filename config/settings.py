@@ -1,5 +1,4 @@
 import os
-import re
 from dotenv import load_dotenv, find_dotenv
 import logging
 
@@ -32,6 +31,14 @@ _TARGET_FIELDS = sorted(
         "threads",
         "ssh_options",
         "python",
+        # DuckDB run knobs. They belong to the target because they are a
+        # property of the machine the SQL lands on, not of the SQL.
+        "memory_limit",
+        "temp_directory",
+        "max_temp_directory_size",
+        "preserve_insertion_order",
+        "profile",
+        "plan_dir",
     ],
     key=len,
     reverse=True,
@@ -66,6 +73,19 @@ def load_targets() -> dict[str, dict[str, str]]:
         DB_TARGET_MR3_CONTAINER=pgduckdb
         DB_TARGET_MR3_PG_USER=postgres
         DB_TARGET_MR3_PG_DATABASE=my_db
+
+    A native-DuckDB target adds the run knobs:
+
+        DB_TARGET_MR3DUCK_TRANSPORT=ssh+duckdb
+        DB_TARGET_MR3DUCK_SSH=mr3-lan
+        DB_TARGET_MR3DUCK_WSL=false
+        DB_TARGET_MR3DUCK_MEMORY_LIMIT=16GB
+        DB_TARGET_MR3DUCK_THREADS=8
+        DB_TARGET_MR3DUCK_TEMP_DIRECTORY=~/duckdb_spill
+        DB_TARGET_MR3DUCK_MAX_TEMP_DIRECTORY_SIZE=512GB
+        DB_TARGET_MR3DUCK_PRESERVE_INSERTION_ORDER=false
+        DB_TARGET_MR3DUCK_PROFILE=false
+        DB_TARGET_MR3DUCK_PLAN_DIR=reports/plans
 
     Resolves to:
 

@@ -172,3 +172,44 @@ class TestPlanStore:
     def test_generated_run_id_is_a_sortable_timestamp(self):
         run_id = new_run_id()
         assert len(run_id) == 15 and run_id[8] == "T"
+
+
+class TestPlansCli:
+    """`main.py --plans` is the front door; the store is useless without it."""
+
+    def _seed(self, root):
+        for run_id in ("20260101T000000", "20260102T000000"):
+            PlanStore(root, run_id=run_id).record(
+                step="load", seconds=1.0, profile=PROFILE
+            )
+
+    def test_defaults_to_the_latest_run(self, tmp_path, capsys):
+        import main
+
+        self._seed(tmp_path)
+        main._show_plans(str(tmp_path), "")
+        assert "run 20260102T000000" in capsys.readouterr().out
+
+    def test_lists_run_ids(self, tmp_path, capsys):
+        import main
+
+        self._seed(tmp_path)
+        main._show_plans(str(tmp_path), "list")
+        assert capsys.readouterr().out.split() == [
+            "20260101T000000",
+            "20260102T000000",
+        ]
+
+    def test_names_an_unknown_run_instead_of_guessing(self, tmp_path, capsys):
+        import main
+
+        self._seed(tmp_path)
+        with pytest.raises(SystemExit):
+            main._show_plans(str(tmp_path), "nope")
+        assert "no run 'nope'" in capsys.readouterr().err
+
+    def test_empty_store_exits_nonzero(self, tmp_path):
+        import main
+
+        with pytest.raises(SystemExit):
+            main._show_plans(str(tmp_path), "")

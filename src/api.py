@@ -29,7 +29,11 @@ from typing import Any, Mapping
 
 from src.executor import Executor
 from src.transport import (
-    Transport, build_transport, _build_db_url as build_db_url,
+    DuckDbSettings,
+    Transport,
+    build_transport,
+    coerce_bool as _coerce_bool,
+    _build_db_url as build_db_url,
 )
 
 log = logging.getLogger(__name__)
@@ -132,12 +136,6 @@ def _resolve_target(name: str) -> dict[str, Any]:
     return dict(targets[name])
 
 
-def _coerce_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
-
-
 def run_sql(
     sql: str,
     *,
@@ -153,6 +151,7 @@ def run_sql(
     sudo: bool = True,
     helper_path: str = "/tmp/_orch_duckdb.py",
     threads: int = 8,
+    settings: DuckDbSettings | None = None,
     python: str = "python3",
     params: Mapping[str, Any] | None = None,
     limit: int | None = None,
@@ -239,7 +238,7 @@ def run_sql(
             ssh = cfg["ssh"]
             wsl = _coerce_bool(cfg.get("wsl", True))
             helper_path = cfg.get("helper_path", "/tmp/_orch_duckdb.py")
-            threads = int(cfg.get("threads", 8))
+            settings = DuckDbSettings.from_mapping(cfg)
             python = cfg.get("python", "python3")
         elif transport in ("ssh+clickhouse", "ssh_clickhouse", "clickhouse+ssh"):
             ssh = cfg["ssh"]
@@ -276,6 +275,7 @@ def run_sql(
             ch_database=ch_database,
             wsl=wsl, sudo=sudo,
             helper_path=helper_path, threads=threads,
+            settings=settings,
             python=python,
         )
     else:

@@ -175,6 +175,32 @@ def _is_pid_alive(pid):
             return False
 
 
+def _show_plans(plan_dir: str, selector: str) -> None:
+    """Print a captured run's plan summary.
+
+    `selector` is a run id, `'list'`, or empty for the latest run. This
+    is the thing that makes captured plans usable — a directory of raw
+    JSON nobody reads is not the deliverable."""
+    from src.plans import format_summary, list_runs, load_run
+
+    runs = list_runs(plan_dir)
+    if not runs:
+        print(f"No captured plans under {plan_dir}.", file=sys.stderr)
+        sys.exit(1)
+    if selector == "list":
+        for run_id in runs:
+            print(run_id)
+        return
+    run_id = selector or runs[-1]
+    if run_id not in runs:
+        print(
+            f"ERROR: no run {run_id!r} under {plan_dir}. Known: {runs}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(format_summary(load_run(plan_dir, run_id)))
+
+
 def main():
     """
     Main entry point for the Database Task Orchestrator CLI.
@@ -264,7 +290,28 @@ def main():
         "default DB_* connection is needed.",
     )
 
+    # Plan inspection
+    parser.add_argument(
+        "--plans",
+        nargs="?",
+        const="",
+        metavar="RUN_ID",
+        help="Summarise a captured run's execution plans: slowest steps and "
+        "dominant operators. Omit RUN_ID for the latest run; pass 'list' to "
+        "list the run ids that exist.",
+    )
+    parser.add_argument(
+        "--plan-dir",
+        type=str,
+        default=os.getenv("ORCH_PLAN_DIR", "reports/plans"),
+        help="Where captured plans live (default: reports/plans, or $ORCH_PLAN_DIR).",
+    )
+
     args = parser.parse_args()
+
+    if args.plans is not None:
+        _show_plans(args.plan_dir, args.plans)
+        return
 
     # Handle status/kill before anything else
     if args.status:

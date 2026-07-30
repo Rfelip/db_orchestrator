@@ -30,6 +30,7 @@ working unchanged: the server surfaces the SAME error signatures the
 subprocess path printed to stderr.  Classification is done entirely on the
 client by substring matching — the server does not duplicate that logic.
 """
+
 from __future__ import annotations
 
 import json
@@ -39,10 +40,15 @@ from pathlib import Path
 from typing import Any, Mapping, TextIO
 
 from src.api import (
-    DqlOnlyError, QueryResult, _apply_limit, _resolve_target, _coerce_bool,
+    QueryResult,
+    _apply_limit,
+    _resolve_target,
+    _coerce_bool,
 )
 from src.transport import (
-    Transport, build_transport, DirectTransport,
+    DuckDbSettings,
+    Transport,
+    build_transport,
 )
 from src.database import DatabaseManager
 
@@ -65,6 +71,7 @@ class PersistentDirectTransport:
 
     def __init__(self, db_config: Mapping[str, Any]) -> None:
         from src.transport import _build_db_url
+
         self._url = _build_db_url(db_config)
         self._db: DatabaseManager | None = None
 
@@ -73,9 +80,9 @@ class PersistentDirectTransport:
             self._db = DatabaseManager(self._url)
         return self._db
 
-    def execute(self, sql: str,
-                params: Mapping[str, Any] | None = None):
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None):
         from src.transport import RawResult
+
         db = self._manager()
         session = db.get_session()
         try:
@@ -119,29 +126,37 @@ class TransportPool:
         kind = cfg.get("transport", "direct")
         if kind == "direct":
             db_config = {
-                "dialect": cfg["dialect"], "user": cfg["user"],
-                "password": cfg["password"], "host": cfg["host"],
-                "port": cfg["port"], "database": cfg.get("database"),
+                "dialect": cfg["dialect"],
+                "user": cfg["user"],
+                "password": cfg["password"],
+                "host": cfg["host"],
+                "port": cfg["port"],
+                "database": cfg.get("database"),
                 "service": cfg.get("service"),
             }
             tp = PersistentDirectTransport(db_config)
         elif kind in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
             tp = build_transport(
-                transport=kind, ssh=cfg["ssh"],
+                transport=kind,
+                ssh=cfg["ssh"],
                 wsl=_coerce_bool(cfg.get("wsl", True)),
                 helper_path=cfg.get("helper_path", "/tmp/_orch_duckdb.py"),
-                threads=int(cfg.get("threads", 8)),
+                settings=DuckDbSettings.from_mapping(cfg),
             )
         elif kind in ("ssh+clickhouse", "ssh_clickhouse", "clickhouse+ssh"):
             tp = build_transport(
-                transport=kind, ssh=cfg["ssh"], container=cfg["container"],
+                transport=kind,
+                ssh=cfg["ssh"],
+                container=cfg["container"],
                 ch_database=cfg.get("ch_database"),
                 wsl=_coerce_bool(cfg.get("wsl", True)),
                 sudo=_coerce_bool(cfg.get("sudo", True)),
             )
         else:  # ssh+wsl (psql) and aliases
             tp = build_transport(
-                transport=kind, ssh=cfg["ssh"], container=cfg["container"],
+                transport=kind,
+                ssh=cfg["ssh"],
+                container=cfg["container"],
                 pg_user=cfg.get("pg_user", "postgres"),
                 pg_database=cfg.get("pg_database", "postgres"),
                 wsl=_coerce_bool(cfg.get("wsl", True)),
@@ -180,9 +195,7 @@ def _handle_request(req: dict, pool: TransportPool) -> dict:
     limit = req.get("limit")
     try:
         if not sql_file or not target or not output:
-            raise ValueError(
-                "request needs 'sql_file', 'target', and 'output'"
-            )
+            raise ValueError("request needs 'sql_file', 'target', and 'output'")
         sql_path = Path(sql_file)
         if not sql_path.exists():
             raise FileNotFoundError(f"SQL file not found: {sql_path}")
@@ -199,8 +212,11 @@ def _handle_request(req: dict, pool: TransportPool) -> dict:
 
         raw = tp.execute(rendered)
         result = QueryResult(
-            columns=raw.columns, rows=raw.rows, elapsed_ms=raw.elapsed_ms,
-            sql_hash="", transport=tp.name,
+            columns=raw.columns,
+            rows=raw.rows,
+            elapsed_ms=raw.elapsed_ms,
+            sql_hash="",
+            transport=tp.name,
         )
         out_path = Path(output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,8 +231,12 @@ def _handle_request(req: dict, pool: TransportPool) -> dict:
         return {"id": rid, "ok": False, "rows": 0, "error": msg}
 
 
-def serve(stdin: TextIO | None = None, stdout: TextIO | None = None,
-          *, pool: TransportPool | None = None) -> int:
+def serve(
+    stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
+    *,
+    pool: TransportPool | None = None,
+) -> int:
     """Read line-delimited JSON requests from `stdin`, run each on a
     persistent per-target transport, write one JSON response line per
     request to `stdout`. Returns 0 on clean EOF / shutdown.
@@ -240,9 +260,17 @@ def serve(stdin: TextIO | None = None, stdout: TextIO | None = None,
             try:
                 req = json.loads(line)
             except json.JSONDecodeError as exc:
-                stdout.write(json.dumps(
-                    {"id": None, "ok": False, "rows": 0,
-                     "error": f"ERROR: bad request JSON: {exc}"}) + "\n")
+                stdout.write(
+                    json.dumps(
+                        {
+                            "id": None,
+                            "ok": False,
+                            "rows": 0,
+                            "error": f"ERROR: bad request JSON: {exc}",
+                        }
+                    )
+                    + "\n"
+                )
                 stdout.flush()
                 continue
             if req.get("cmd") == "shutdown":
