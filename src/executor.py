@@ -55,6 +55,8 @@ class Executor:
         enable_all=False,
         duckdb_transport=None,
         plan_store=None,
+        ledger=None,
+        resume=None,
     ):
         """
         Initialize the Executor.
@@ -73,6 +75,12 @@ class Executor:
                 share TEMP TABLEs.
             plan_store (PlanStore | None): Where per-statement DuckDB plans
                 are captured. Only meaningful with `duckdb_transport`.
+            ledger (RunLedger | None): Records each completed step so a
+                later run can skip it. None keeps the old fire-and-forget
+                behaviour.
+            resume (ResumeRequest | None): A loaded prior ledger plus the
+                optional `--from` / `--until` window. None runs the whole
+                enabled plan, exactly as before.
         """
         self.manifest_path = manifest_path
         self.db_config = db_config
@@ -81,6 +89,8 @@ class Executor:
         self.enable_all = enable_all
         self.duckdb_transport = duckdb_transport
         self.plan_store = plan_store
+        self.ledger = ledger
+        self.resume = resume
 
         self.yaml_manager = YamlManager(manifest_path)
         self.notifier = build_notifier(notifier_config)
@@ -117,16 +127,20 @@ class Executor:
 
             log.info(f"Loaded {len(all_steps)} steps. {len(execution_queue)} enabled.")
 
-            if not execution_queue:
-                log.info("No enabled steps found. Exiting.")
-                return
-
         except Exception as e:
             log.critical(f"Failed to load manifest: {e}")
             self.notifier.send_alert(
                 "Orchestrator Failure", f"Failed to load manifest: {e}"
             )
             sys.exit(1)
+
+        # A bad --from/--until/--resume raises out of here on purpose: a
+        # mistyped selector must not degrade into "run all 345 steps".
+        execution_queue = self._apply_resume(execution_queue)
+
+        if not execution_queue:
+            log.info("Nothing to run. Exiting.")
+            return
 
         # 2. Build grouped plan. Two collapsing concepts:
         #    - joined_group: consecutive steps that will be FUSED into one psql call
@@ -264,6 +278,67 @@ class Executor:
         finally:
             if db_manager:
                 db_manager.close()
+
+    # ------- resume ----------------------------------------------------------
+
+    def _apply_resume(self, queue):
+        """Narrow the plan to the `--from`/`--until` window, then drop the
+        steps a prior run's ledger proves are done.
+
+        Order matters: the window is what the human asked to run, and the
+        ledger only ever removes work from inside it.
+        """
+        if self.resume is None:
+            return queue
+        from src.ledger import decide_resume, format_resume_banner, select_window
+
+        names = [s.name for s in queue]
+        first, stop = select_window(
+            names, start=self.resume.start, until=self.resume.until
+        )
+        window = queue[first:stop]
+        if not self.resume.prior:
+            return window
+        checks = [self._step_evidence(s) for s in window]
+        decision = decide_resume(checks, {e.step: e for e in self.resume.prior})
+        banner = format_resume_banner(
+            decision, total=len(window), run_id=self.resume.source_run_id
+        )
+        print(f"\n{banner}\n")
+        log.warning(banner)
+        skipped = set(decision.skip)
+        return [s for s in window if s.name not in skipped]
+
+    def _step_evidence(self, step):
+        """Gather what is knowable about one planned step: its SQL
+        fingerprint, and whether its declared output is still there."""
+        from src.ledger import StepCheck, source_fingerprint
+
+        produces = (
+            render_template(step.produces, step.params) if step.produces else None
+        )
+        return StepCheck(
+            name=step.name,
+            source_sha=source_fingerprint(step.file, step.params),
+            produces=produces,
+            output_present=Path(produces).exists() if produces else None,
+        )
+
+    def _record_in_ledger(self, step, duration) -> None:
+        """Append one completed step. Failing to write the ledger must
+        not fail the run — it costs a resume, not a result."""
+        if self.ledger is None:
+            return
+        evidence = self._step_evidence(step)
+        try:
+            self.ledger.record(
+                step=step.name,
+                source_sha=evidence.source_sha,
+                produces=evidence.produces,
+                seconds=duration,
+            )
+        except OSError as exc:
+            log.warning(f"Could not write ledger entry for '{step.name}': {exc}")
 
     # ------- native DuckDB execution ----------------------------------------
 
@@ -510,7 +585,9 @@ class Executor:
             raise
 
         executed_steps.extend(recs)
+        by_name = {r["name"]: r["duration"] for r in recs}
         for s in payload:
+            self._record_in_ledger(s, by_name.get(s.name, 0.0))
             yaml_manager.disable_step(s.name)
         if notify:
             total = sum(r["duration"] for r in recs)
@@ -606,6 +683,7 @@ class Executor:
                 "group": step.transaction_group,
             }
         )
+        self._record_in_ledger(step, duration)
         yaml_manager.disable_step(step.name)
         if not notify:
             return
