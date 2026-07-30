@@ -64,6 +64,16 @@ Four deliverables, in the brief's words:
   `enabled: false` mechanism. `ManifestConfig.from_dict` logs a warning when it
   expands anything.
 
+- **`duckdb` is a test-only dependency and is not in `requirements.txt`.** The
+  orchestrator never imports it — the *remote* host does. But the 27 tests that
+  prove session semantics `importorskip` it, so a suite run without it reports
+  green while skipping the part that matters. Run them with:
+
+  ```sh
+  uv run --with pytest --with sqlalchemy --with python-dotenv --with ruamel.yaml \
+         --with jinja2 --with requests --with duckdb python -m pytest tests -q
+  ```
+
 ## Success criteria
 
 - Full suite green before and after.
