@@ -3,14 +3,11 @@
 The assembly under test is the one that matters on the 345-step tábua
 run — expanded step names, a real DuckDB session, a ledger written as
 the run goes, and a second run that skips what the first finished.
-Nothing here is mocked above the ssh hop.
+Nothing here is mocked: the local DuckDB transport is the real one.
 """
-
-import sys
 
 import pytest
 
-from src.duckdb_session import write_helper
 from src.executor import Executor
 from src.ledger import (
     NoStepMatchedError,
@@ -19,33 +16,16 @@ from src.ledger import (
     load_ledger,
 )
 from src.plans import PlanStore
-from src.transport import DuckDbSettings
+from src.transport import DuckDbLocalTransport, DuckDbSettings
 
 pytest.importorskip("duckdb")
 
 
-class LocalDuckDbTransport:
-    """Runs the session helper on this machine — same contract as
-    `DuckDbSshTransport`, minus the ssh hop, which carries none of the
-    semantics under test."""
-
-    name = "ssh+duckdb"
-
-    def __init__(self, helper, settings):
-        self.helper = helper
-        self.settings = settings
-
-    def session_command(self):
-        return [sys.executable, str(self.helper), "--serve"]
-
-
 @pytest.fixture
 def transport(tmp_path):
-    helper = tmp_path / "helper.py"
-    write_helper(helper)
-    return LocalDuckDbTransport(
-        helper,
-        DuckDbSettings(
+    return DuckDbLocalTransport(
+        helper_path=str(tmp_path / "helper.py"),
+        settings=DuckDbSettings(
             memory_limit="1GB",
             threads=2,
             temp_directory=str(tmp_path / "spill"),

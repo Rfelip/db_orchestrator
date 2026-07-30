@@ -1,6 +1,6 @@
 """Transports — how a SQL statement actually reaches a database.
 
-Two implementations live here:
+The implementations live here:
 
   - `DirectTransport` connects to a database via SQLAlchemy. Use when
     the caller has a network-reachable host:port (local Postgres,
@@ -13,7 +13,12 @@ Two implementations live here:
     terminates at the Windows host, so direct connections are
     refused).
 
-Both transports return a `RawResult` with columns + rows + elapsed_ms.
+  - `DuckDbSshTransport` and `DuckDbLocalTransport` both run the same
+    DuckDB helper program: one over ssh, one as a child process here.
+    Which one a manifest wants is decided by where `main.py` runs
+    relative to the data, not by preference — see `DuckDbLocalTransport`.
+
+All transports return a `RawResult` with columns + rows + elapsed_ms.
 The `run_sql` entry point in `src.api` picks one and types the output.
 """
 
@@ -25,8 +30,10 @@ import json
 import logging
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from src.database import DatabaseManager
@@ -408,8 +415,60 @@ def main(argv):
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 '''
-"""Source of the remote helper. Kept as a string because it has to run on
-the *other* machine, where this package does not exist."""
+"""Source of the helper program. Kept as a string because the ssh path has
+to run it on the *other* machine, where this package does not exist."""
+
+
+def write_helper(path: Path) -> None:
+    """Drop the DuckDB helper on the LOCAL filesystem.
+
+    The ssh path uploads it with `tee`; this is how the local transport
+    and the tests get the exact same program — the session protocol is
+    only worth testing against the code that will actually serve it."""
+    path.write_text(DUCKDB_HELPER, encoding="utf-8")
+
+
+def _run_duckdb_helper(
+    argv: list[str], settings: DuckDbSettings, sql: str, label: str
+) -> RawResult:
+    """One-shot helper invocation: settings on the first stdin line, SQL
+    after it, CSV back on stdout.
+
+    Shared by both DuckDB transports on purpose. They differ only in the
+    argv that fronts the helper; a local transport carrying its own copy
+    of this would be a second execution path to keep in step with the
+    remote one, which is exactly the divergence it exists to remove."""
+    log.info("%s executing (%d chars)...", label, len(sql))
+    stdin = json.dumps(settings.as_payload()) + "\n" + sql
+    start = time.monotonic()
+    proc = subprocess.run(
+        argv,
+        input=stdin.encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(f"{label} failed (rc={proc.returncode}): {stderr[:500]}")
+    columns, rows = _parse_psql_csv(proc.stdout.decode("utf-8", errors="replace"))
+    log.info("%s returned %d rows (%dms).", label, len(rows), elapsed_ms)
+    return RawResult(columns=columns, rows=rows, elapsed_ms=elapsed_ms)
+
+
+class DuckDbTransport(Protocol):
+    """A transport that can host a persistent DuckDB session.
+
+    Narrower than `Transport`: `Executor`'s DuckDB path does not call
+    `execute()` at all — it asks for the argv of a helper that will stay
+    alive for the whole run, and for the settings that helper opens with.
+    `DuckDbSshTransport` and `DuckDbLocalTransport` both satisfy it, and
+    `src.duckdb_session.open_transport_session` accepts either."""
+
+    name: str
+    settings: DuckDbSettings
+
+    def session_command(self) -> list[str]: ...
 
 
 class DuckDbSshTransport:
@@ -499,26 +558,85 @@ class DuckDbSshTransport:
                 "Render the SQL before calling execute()."
             )
         self._ensure_helper()
-        cmd = self._ssh_prefix() + [self.python, self.helper_path]
-        log.info("DuckDbSshTransport executing on %s (%d chars)...", self.ssh, len(sql))
-        stdin = json.dumps(self.settings.as_payload()) + "\n" + sql
-        start = time.monotonic()
-        proc = subprocess.run(
-            cmd,
-            input=stdin.encode("utf-8"),
-            capture_output=True,
-            check=False,
+        return _run_duckdb_helper(
+            self._ssh_prefix() + [self.python, self.helper_path],
+            self.settings,
+            sql,
+            f"{self.name} on {self.ssh}",
         )
-        elapsed_ms = int((time.monotonic() - start) * 1000)
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"ssh+duckdb failed (rc={proc.returncode}): {stderr[:500]}"
+
+
+class DuckDbLocalTransport:
+    """Run DuckDB in a helper process on THIS machine — no ssh at all.
+
+    The sibling of `DuckDbSshTransport`, and the one a manifest wants
+    whenever the orchestrator already runs where the data is. MR3 invokes
+    `main.py` on MR3: an ssh transport there would `ssh` the box to
+    itself, back through the comp20 hop, with no key installed. Moving
+    `main.py` to the laptop fixes the ssh but breaks everything the
+    executor does with paths — `_prepare_output_dir` and `--resume` stat
+    the local filesystem, so directories get made on the wrong machine
+    and resume verifies files that were never going to be there. Neither
+    placement works; running DuckDB locally is what makes one of them
+    work.
+
+    Everything below the argv is shared with the ssh transport: same
+    helper source, same JSON-line session protocol, same
+    `DuckDbSettings`. The only thing that differs is that the helper is
+    written with `write_helper` instead of shipped through `tee`.
+
+    Args:
+        helper_path: where the helper program is written on this machine.
+        settings: DuckDB knobs for the connection.
+        python: interpreter that runs the helper. Defaults to the one
+            running the orchestrator, which is the interpreter whose
+            environment was already resolved to have `duckdb`.
+    """
+
+    name = "duckdb"
+
+    def __init__(
+        self,
+        *,
+        helper_path: str = "/tmp/_orch_duckdb.py",
+        settings: DuckDbSettings | None = None,
+        python: str | None = None,
+    ) -> None:
+        # Expanded here rather than at use: the path goes into an argv,
+        # and no shell is involved to expand a `~` on the way.
+        self.helper_path = str(Path(helper_path).expanduser())
+        self.settings = settings or DuckDbSettings()
+        self.python = python or sys.executable
+        self._helper_written = False
+
+    @property
+    def threads(self) -> int:
+        return self.settings.threads
+
+    def session_command(self) -> list[str]:
+        """argv that starts a persistent local DuckDB. Writes the helper
+        first — the process cannot start without it."""
+        self._ensure_helper()
+        return [self.python, self.helper_path, "--serve"]
+
+    def _ensure_helper(self) -> None:
+        if self._helper_written:
+            return
+        path = Path(self.helper_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_helper(path)
+        self._helper_written = True
+
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
+        if params:
+            raise NotImplementedError(
+                "DuckDbLocalTransport does not support :name bind params. "
+                "Render the SQL before calling execute()."
             )
-        body = proc.stdout.decode("utf-8", errors="replace")
-        columns, rows = _parse_psql_csv(body)
-        log.info("DuckDbSshTransport returned %d rows (%dms).", len(rows), elapsed_ms)
-        return RawResult(columns=columns, rows=rows, elapsed_ms=elapsed_ms)
+        self._ensure_helper()
+        return _run_duckdb_helper(
+            [self.python, self.helper_path], self.settings, sql, self.name
+        )
 
 
 class ClickHouseSshTransport:
@@ -659,7 +777,7 @@ def build_transport(
     helper_path: str = "/tmp/_orch_duckdb.py",
     threads: int = 8,
     settings: DuckDbSettings | None = None,
-    python: str = "python3",
+    python: str | None = None,
 ) -> Transport:
     """Return a transport based on the supplied arguments.
 
@@ -670,7 +788,11 @@ def build_transport(
 
     `threads` is the one-knob shorthand kept for existing callers;
     `settings` carries the full `DuckDbSettings` and wins when both are
-    given."""
+    given.
+
+    `python` has no single sensible default across transports: the remote
+    helper wants whatever the *host* calls python3, the local one wants
+    the interpreter already running, so each branch names its own."""
     kind = (transport or "direct").lower()
     if kind == "direct":
         if db_config is None:
@@ -697,6 +819,12 @@ def build_transport(
             ssh=ssh,
             helper_path=helper_path,
             wsl=wsl,
+            settings=settings or DuckDbSettings(threads=threads),
+            python=python or "python3",
+        )
+    if kind in ("duckdb", "duckdb+local", "local+duckdb"):
+        return DuckDbLocalTransport(
+            helper_path=helper_path,
             settings=settings or DuckDbSettings(threads=threads),
             python=python,
         )

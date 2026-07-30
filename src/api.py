@@ -43,6 +43,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+DUCKDB_SSH_KINDS = ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh")
+DUCKDB_LOCAL_KINDS = ("duckdb", "duckdb+local", "local+duckdb")
+"""The `DB_TARGET_<NAME>_TRANSPORT` spellings that mean native DuckDB.
+Named here because both `run_sql` and `run_manifest` have to recognise
+the same set, and a target that ran ad-hoc but not as a manifest — or
+the reverse — is the confusing kind of broken."""
+
+
 _FORBIDDEN_DQL_PATTERNS = re.compile(
     r"^\s*(CREATE|DROP|ALTER|TRUNCATE|INSERT|UPDATE|DELETE|MERGE|GRANT|REVOKE|EXEC|EXECUTE|CALL)\b",
     re.IGNORECASE | re.MULTILINE,
@@ -158,7 +166,7 @@ def run_sql(
     helper_path: str = "/tmp/_orch_duckdb.py",
     threads: int = 8,
     settings: DuckDbSettings | None = None,
-    python: str = "python3",
+    python: str | None = None,
     params: Mapping[str, Any] | None = None,
     limit: int | None = None,
     dql_only: bool = False,
@@ -187,7 +195,8 @@ def run_sql(
             ssh+wsl (some callers may want to pass it for context only;
             the transport itself uses its own dispatch).
         transport: ``'direct'`` (default), ``'ssh+wsl'``,
-            ``'ssh+duckdb'``, ``'ssh+clickhouse'``, or a pre-built
+            ``'ssh+duckdb'``, ``'duckdb'`` (DuckDB in a helper process on
+            this machine), ``'ssh+clickhouse'``, or a pre-built
             `Transport` instance.
         ssh, container, pg_user, pg_database, ch_database, wsl, sudo:
             ssh-transport constructor arguments (`ch_database` is the
@@ -240,12 +249,16 @@ def run_sql(
                 "database": cfg.get("database"),
                 "service": cfg.get("service"),
             }
-        elif transport in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
+        elif transport in DUCKDB_SSH_KINDS:
             ssh = cfg["ssh"]
             wsl = _coerce_bool(cfg.get("wsl", True))
             helper_path = cfg.get("helper_path", "/tmp/_orch_duckdb.py")
             settings = DuckDbSettings.from_mapping(cfg)
             python = cfg.get("python", "python3")
+        elif transport in DUCKDB_LOCAL_KINDS:
+            helper_path = cfg.get("helper_path", "/tmp/_orch_duckdb.py")
+            settings = DuckDbSettings.from_mapping(cfg)
+            python = cfg.get("python")
         elif transport in ("ssh+clickhouse", "ssh_clickhouse", "clickhouse+ssh"):
             ssh = cfg["ssh"]
             container = cfg["container"]
@@ -351,9 +364,10 @@ def run_manifest(
     """Load and execute a YAML manifest end-to-end.
 
     Pass `db_config` for the Oracle / Postgres path, or `target` to name
-    a `DB_TARGET_<NAME>_*` entry. A target whose transport is
-    `ssh+duckdb` runs the whole manifest on ONE persistent remote DuckDB,
-    which is the only mode in which steps share TEMP TABLEs.
+    a `DB_TARGET_<NAME>_*` entry. A target whose transport is `ssh+duckdb`
+    or `duckdb` runs the whole manifest on ONE persistent DuckDB — remote
+    or local respectively — which is the only mode in which steps share
+    TEMP TABLEs.
 
     `resume` (a `src.ledger.ResumeOptions`) controls two independent
     things: which slice of the expanded plan to run (`start` / `until`)
@@ -428,20 +442,23 @@ def _prepare_resume(
 def _manifest_target(name: str) -> tuple[Any, Mapping[str, Any]]:
     """Resolve a named target into (duckdb transport | None, db_config).
 
-    Only `ssh+duckdb` gets a transport; every other target still runs
-    through the SQLAlchemy path with its own connection details, so
-    Oracle and Postgres manifests are unaffected."""
+    Only a native-DuckDB target gets a transport; every other target
+    still runs through the SQLAlchemy path with its own connection
+    details, so Oracle and Postgres manifests are unaffected.
+
+    `ssh` is required for the remote kinds and meaningless for the local
+    one, which is the whole difference between them."""
     cfg = _resolve_target(name)
     kind = cfg.get("transport", "direct")
-    if kind not in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
+    if kind not in DUCKDB_SSH_KINDS + DUCKDB_LOCAL_KINDS:
         return None, cfg
     transport = build_transport(
         transport=kind,
-        ssh=cfg["ssh"],
+        ssh=cfg["ssh"] if kind in DUCKDB_SSH_KINDS else None,
         wsl=_coerce_bool(cfg.get("wsl", True)),
         helper_path=cfg.get("helper_path", "/tmp/_orch_duckdb.py"),
         settings=DuckDbSettings.from_mapping(cfg),
-        python=cfg.get("python", "python3"),
+        python=cfg.get("python"),
     )
     return transport, cfg
 

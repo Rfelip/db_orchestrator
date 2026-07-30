@@ -76,8 +76,9 @@ class Executor:
             dry_run (bool): If True, only print the plan and exit.
             force (bool): If True, skip user confirmation.
             enable_all (bool): If True, run all tasks regardless of 'enabled' flag.
-            duckdb_transport (DuckDbSshTransport | None): When set, the whole
-                manifest runs on ONE persistent remote DuckDB instead of a
+            duckdb_transport (DuckDbTransport | None): When set, the whole
+                manifest runs on ONE persistent DuckDB — remote or local,
+                depending on the transport — instead of a
                 SQLAlchemy engine. This is the only mode in which steps can
                 share TEMP TABLEs.
             plan_store (PlanStore | None): Where per-statement DuckDB plans
@@ -385,17 +386,19 @@ class Executor:
     # ------- native DuckDB execution ----------------------------------------
 
     def _run_on_duckdb(self, execution_queue):
-        """Run the whole queue on ONE persistent remote DuckDB.
+        """Run the whole queue on ONE persistent DuckDB.
 
         Transaction and joined groups are ignored here on purpose: a
         single session already is the shared context those two labels
         exist to fake. What the session adds instead is real state — a
         `TEMP TABLE` from step N is there for step N+1.
         """
-        from src.duckdb_session import open_ssh_session
+        from src.duckdb_session import open_transport_session
 
         executed_steps = []
-        with open_ssh_session(self.duckdb_transport, plans=self.plan_store) as session:
+        with open_transport_session(
+            self.duckdb_transport, plans=self.plan_store
+        ) as session:
             for step in execution_queue:
                 start_time = time.time()
                 try:

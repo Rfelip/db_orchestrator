@@ -12,9 +12,12 @@ remote host**, and capture the execution plan of every statement it runs.
 
 Four deliverables, in the brief's words:
 
-1. **(c) Persistent session for `DuckDbSshTransport`.** One remote DuckDB process
-   per run instead of one per statement, so `TEMP TABLE`s and macros survive
-   across statements.
+1. **(c) Persistent session for the DuckDB transports.** One DuckDB process per
+   run instead of one per statement, so `TEMP TABLE`s and macros survive across
+   statements. `DuckDbSshTransport` runs it on another host;
+   `DuckDbLocalTransport` runs it here. They share the helper program, the
+   session protocol and `DuckDbSettings`; only the argv fronting the helper and
+   how it gets written differ.
 2. **(d) `foreach` in the manifest schema.** Repetition declared, not generated.
 3. **DuckDB configuration owned here**, settable from `.env`, overridable per run.
 4. **Per-statement plan capture**, stored per run + per step, with a usable summary.
@@ -34,8 +37,11 @@ Four deliverables, in the brief's words:
 
 - **Session state.** Two `run()` calls on the same `DuckDbSession` see the same
   DuckDB connection: a `TEMP TABLE` created by the first is visible to the second.
-- **Teardown.** Leaving `open_duckdb_session(...)` closes the remote process,
+- **Teardown.** Leaving `open_duckdb_session(...)` closes the helper process,
   whether the block exited normally or by exception.
+- **Transport parity.** A statement run through `DuckDbLocalTransport` and one
+  run through `DuckDbSshTransport` reach the same helper with the same settings
+  payload. Behaviour differs only where the machine does.
 - **Honest returns.** A statement with no result set returns `Completed`, never an
   empty `RawResult`. `RawResult` means "there was a result set".
 - **Unknown keys still fail.** Adding `foreach` does not loosen `Step` validation.

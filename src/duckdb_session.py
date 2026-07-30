@@ -1,15 +1,16 @@
-"""A persistent remote DuckDB session — one process, many statements.
+"""A persistent DuckDB session — one process, many statements.
 
-`DuckDbSshTransport.execute()` opens a fresh ssh and a fresh DuckDB per
-call. That is correct for an ad-hoc query and wrong for a pipeline: the
-tábua plan holds a per-bucket `TEMP TABLE _p1b_{bkt}` and an
+A DuckDB transport's `execute()` opens a fresh helper and a fresh DuckDB
+per call. That is correct for an ad-hoc query and wrong for a pipeline:
+the tábua plan holds a per-bucket `TEMP TABLE _p1b_{bkt}` and an
 `exposure_lookup` across steps, and a connection-per-statement transport
 loses both. Running those steps through `execute()` would break
 semantics, not merely performance.
 
-This module keeps the remote helper alive for the span of a run:
+This module keeps the helper alive for the span of a run, over ssh or
+locally — the protocol does not know which:
 
-    with open_ssh_session(transport, settings, plans=store) as session:
+    with open_transport_session(transport, settings, plans=store) as session:
         session.run("CREATE TEMP TABLE t AS SELECT 1")
         session.run("COPY (SELECT * FROM t) TO 'x.parquet'")
 
@@ -33,7 +34,12 @@ from dataclasses import dataclass
 from typing import IO, Any, Iterator
 
 from src.plans import PlanStore
-from src.transport import DUCKDB_HELPER, DuckDbSettings, DuckDbSshTransport, RawResult
+from src.transport import (
+    DuckDbSettings,
+    DuckDbTransport,
+    RawResult,
+    write_helper,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,9 +87,9 @@ success can ignore the branch; callers that read rows must handle it."""
 
 
 class SessionError(RuntimeError):
-    """The remote session failed. Either the statement raised inside
-    DuckDB, or the process died and took the session's TEMP state with
-    it — those are different recoveries, so the message says which."""
+    """The session failed. Either the statement raised inside DuckDB, or
+    the process died and took the session's TEMP state with it — those
+    are different recoveries, so the message says which."""
 
 
 def leading_keyword(sql: str) -> str:
@@ -117,7 +123,7 @@ def classify(
 
 
 class DuckDbSession:
-    """One live remote DuckDB process, driven over a JSON-line protocol.
+    """One live DuckDB helper process, driven over a JSON-line protocol.
 
     Every `run()` lands on the same connection, so TEMP TABLEs, macros
     and settings from an earlier call are visible to a later one. Not
@@ -143,13 +149,13 @@ class DuckDbSession:
 
     def start(self, settings: DuckDbSettings) -> str:
         """Ship the settings and wait for the helper's ready line.
-        Returns the remote DuckDB version."""
+        Returns the helper's DuckDB version."""
         self._send(settings.as_payload())
         hello = self._receive()
         if not hello.get("ready"):
-            raise SessionError(f"remote helper did not report ready: {hello!r}")
+            raise SessionError(f"helper did not report ready: {hello!r}")
         version = str(hello.get("duckdb", "?"))
-        log.info("DuckDB session up (remote duckdb %s)", version)
+        log.info("DuckDB session up (duckdb %s)", version)
         return version
 
     def run(self, sql: str, *, step: str | None = None) -> StatementResult:
@@ -172,7 +178,7 @@ class DuckDbSession:
         return classify(sql, columns, rows, elapsed_ms)
 
     def close(self) -> None:
-        """Shut the remote process down. Idempotent, and safe to call
+        """Shut the helper process down. Idempotent, and safe to call
         from a `finally` after any failure — a session that is already
         dead just gets reaped."""
         if self._closed:
@@ -223,7 +229,7 @@ class DuckDbSession:
             stdin.flush()
             stdin.close()
         except (BrokenPipeError, OSError, ValueError):
-            # The remote is already gone; `_reap` still has to collect it.
+            # The helper is already gone; `_reap` still has to collect it.
             pass
 
     def _reap(self) -> None:
@@ -237,8 +243,8 @@ class DuckDbSession:
             self._proc.wait()
 
     def _stderr(self) -> str:
-        """Tail of the remote helper's stderr. Kept in a file rather than
-        a pipe so a chatty remote can never deadlock the response read."""
+        """Tail of the helper's stderr. Kept in a file rather than a pipe
+        so a chatty helper can never deadlock the response read."""
         if self._errors is None:
             return ""
         try:
@@ -280,28 +286,24 @@ def open_duckdb_session(
 
 
 @contextmanager
-def open_ssh_session(
-    transport: DuckDbSshTransport,
+def open_transport_session(
+    transport: DuckDbTransport,
     settings: DuckDbSettings | None = None,
     *,
     plans: PlanStore | None = None,
 ) -> Iterator[DuckDbSession]:
-    """`open_duckdb_session` over an ssh transport: uploads the helper,
-    then keeps one remote DuckDB alive for the caller's block."""
+    """`open_duckdb_session` over a DuckDB transport: puts the helper
+    where that transport runs it, then keeps one DuckDB alive for the
+    caller's block.
+
+    Takes the transport rather than an argv so ssh and local reach this
+    the same way — the session semantics below this line are identical,
+    and having two entry points would invite them to stop being."""
     chosen = settings or transport.settings
     with open_duckdb_session(
         transport.session_command(), chosen, plans=plans
     ) as session:
         yield session
-
-
-def write_helper(path) -> None:
-    """Drop the remote helper on the LOCAL filesystem.
-
-    The ssh path uploads it with `tee`; this exists so a local DuckDB can
-    run the exact same program — the session protocol is only worth
-    testing against the code that will actually serve it."""
-    path.write_text(DUCKDB_HELPER, encoding="utf-8")
 
 
 __all__ = [
@@ -312,6 +314,6 @@ __all__ = [
     "classify",
     "leading_keyword",
     "open_duckdb_session",
-    "open_ssh_session",
+    "open_transport_session",
     "write_helper",
 ]

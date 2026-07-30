@@ -2,46 +2,24 @@
 
 This is the assembly test — declared fan-out, a session that carries
 TEMP state between steps, and captured plans, all through `Executor`.
-The transport is stubbed to launch the helper locally instead of over
-ssh; everything above that line is the real thing.
+It runs on `DuckDbLocalTransport`, so nothing here is a stub: this is
+the same transport the cold pipeline rebuild uses.
 """
-
-import sys
 
 import pytest
 
-from src.duckdb_session import write_helper
 from src.executor import Executor
 from src.plans import PlanStore
-from src.transport import DuckDbSettings
+from src.transport import DuckDbLocalTransport, DuckDbSettings
 
 pytest.importorskip("duckdb")
 
 
-class LocalDuckDbTransport:
-    """A `DuckDbSshTransport` that runs the helper on this machine.
-
-    Same `session_command()` contract, no ssh — the session protocol is
-    identical either way, and the ssh hop is not what carries the
-    semantics under test."""
-
-    name = "ssh+duckdb"
-
-    def __init__(self, helper, settings):
-        self.helper = helper
-        self.settings = settings
-
-    def session_command(self):
-        return [sys.executable, str(self.helper), "--serve"]
-
-
 @pytest.fixture
 def transport(tmp_path):
-    helper = tmp_path / "helper.py"
-    write_helper(helper)
-    return LocalDuckDbTransport(
-        helper,
-        DuckDbSettings(
+    return DuckDbLocalTransport(
+        helper_path=str(tmp_path / "helper.py"),
+        settings=DuckDbSettings(
             memory_limit="1GB",
             threads=2,
             temp_directory=str(tmp_path / "spill"),

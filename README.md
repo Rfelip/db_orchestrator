@@ -60,6 +60,8 @@ Transports that ship today:
   - **ssh+duckdb** — native DuckDB on the remote host, the full dialect
     (`read_parquet`, `glob`, `filename=true`) that pgduckdb does not
     expose. See *Native DuckDB* below.
+  - **duckdb** — the same native DuckDB, in a child process on **this**
+    machine. No ssh, no key, no hop. See *Native DuckDB* below.
   - **ssh+clickhouse** — `clickhouse-client` in a container over ssh.
 
 The transport is set by `DB_TARGET_<NAME>_TRANSPORT` in `.env`. The
@@ -90,11 +92,21 @@ is a thin CLI wrapper around them.
 
 ## Native DuckDB
 
-A `ssh+duckdb` target runs the manifest on **one persistent remote
+A `ssh+duckdb` or `duckdb` target runs the manifest on **one persistent
 DuckDB** — a single process for the whole run, so a `TEMP TABLE` created
 in one step is there for the next. That is a semantic requirement, not a
 speed optimisation: a pipeline that stages per-bucket temp tables cannot
 work on a connection-per-statement transport.
+
+The two differ only in where that process starts, and the choice is
+forced by where `main.py` runs relative to the data:
+
+  - `ssh+duckdb` when the orchestrator drives a DuckDB on another host.
+  - `duckdb` when the orchestrator already runs **on** the machine
+    holding the data. `Executor` makes output directories and `--resume`
+    stats `produces:` paths through the local filesystem, so an
+    orchestrator split from its data by ssh makes directories on the
+    wrong machine and resumes against files that were never there.
 
 ```bash
 python main.py --manifest manifests/pipeline.yaml --target MR3DUCK --force
@@ -115,6 +127,20 @@ DB_TARGET_MR3DUCK_PRESERVE_INSERTION_ORDER=false
 DB_TARGET_MR3DUCK_PROFILE=false
 ```
 
+A local target drops `SSH`, `WSL` and `PYTHON` and keeps every knob:
+
+```ini
+DB_TARGET_LOCALDUCK_TRANSPORT=duckdb
+DB_TARGET_LOCALDUCK_MEMORY_LIMIT=16GB
+DB_TARGET_LOCALDUCK_THREADS=8
+DB_TARGET_LOCALDUCK_TEMP_DIRECTORY=~/duckdb_spill
+DB_TARGET_LOCALDUCK_MAX_TEMP_DIRECTORY_SIZE=512GB
+```
+
+`PYTHON` defaults to the interpreter running the orchestrator, which is
+the one whose environment already resolved `duckdb`; name it only to
+point at a different venv.
+
 `temp_directory` must sit on fast storage — `~` on MR3 is NVMe;
 `/mnt/BANCOS` is a rotational RAID1 and spill is write-heavy.
 `max_temp_directory_size` is validated as a bounded size because the
@@ -123,12 +149,15 @@ host is shared and an unbounded spill fills the root filesystem.
 As a library:
 
 ```python
-from src.duckdb_session import open_ssh_session
+from src.duckdb_session import open_transport_session
 from src.transport import DuckDbSettings, build_transport
 
 transport = build_transport(transport="ssh+duckdb", ssh="mr3-lan", wsl=False,
                             settings=DuckDbSettings(memory_limit="16GB"))
-with open_ssh_session(transport) as session:
+# ...or, on the machine that holds the data:
+#   build_transport(transport="duckdb",
+#                   settings=DuckDbSettings(memory_limit="16GB"))
+with open_transport_session(transport) as session:
     session.run("CREATE TEMP TABLE t AS SELECT 1")
     result = session.run("SELECT * FROM t")
 ```

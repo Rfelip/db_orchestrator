@@ -300,7 +300,9 @@ def main():
         help="Named DB target (DB_TARGET_<NAME>_* in .env), e.g. MR3 or "
         "MR3DUCK. Works in query AND manifest mode; supplies transport + "
         "secrets so no default DB_* connection is needed. An ssh+duckdb "
-        "target runs the whole manifest on one persistent DuckDB session.",
+        "target runs the whole manifest on one persistent DuckDB session on "
+        "another host; a duckdb target does the same in a child process "
+        "here, needing no ssh at all.",
     )
 
     # Plan inspection
