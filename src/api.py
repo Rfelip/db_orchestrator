@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from src.executor import Executor
 from src.transport import (
@@ -36,6 +36,9 @@ from src.transport import (
     coerce_bool as _coerce_bool,
     _build_db_url as build_db_url,
 )
+
+if TYPE_CHECKING:
+    from src.ledger import ResumeOptions
 
 log = logging.getLogger(__name__)
 
@@ -343,6 +346,7 @@ def run_manifest(
     enable_all: bool = False,
     target: str | None = None,
     plan_dir: Path | str | None = None,
+    resume: "ResumeOptions | None" = None,
 ) -> None:
     """Load and execute a YAML manifest end-to-end.
 
@@ -351,9 +355,17 @@ def run_manifest(
     `ssh+duckdb` runs the whole manifest on ONE persistent remote DuckDB,
     which is the only mode in which steps share TEMP TABLEs.
 
+    `resume` (a `src.ledger.ResumeOptions`) controls two independent
+    things: which slice of the expanded plan to run (`start` / `until`)
+    and which prior run's ledger to skip completed steps from (`run_id`).
+    Omit it and the run behaves exactly as it did before resume existed —
+    whole plan, no ledger.
+
     Side effects:
         - Writes per-step plans + rendered SQL + summary.json + report.html
           under `reports/{timestamp}/`.
+        - Appends one ledger line per completed step under
+          `<plan_dir>/<run_id>/ledger.jsonl` (unless `resume.record` is off).
         - Disables completed steps in the manifest YAML in place
           (preserves comments).
         - Sends notifications to whatever channels are configured in
@@ -361,13 +373,18 @@ def run_manifest(
     """
     if target is None and db_config is None:
         raise ValueError("run_manifest needs either `db_config` or `target`.")
+    from src.plans import new_run_id
+
+    run_id = new_run_id()
+    root = plan_dir or (resume.root if resume else "reports/plans")
     duckdb_transport, plans = None, None
     if target is not None:
         duckdb_transport, db_config = _manifest_target(target)
         if duckdb_transport is not None and duckdb_transport.settings.profile:
             from src.plans import PlanStore
 
-            plans = PlanStore(plan_dir or "reports/plans")
+            plans = PlanStore(root, run_id)
+    ledger, request = _prepare_resume(resume, root, run_id)
     executor = Executor(
         manifest_path=manifest_path,
         db_config=db_config,
@@ -377,8 +394,35 @@ def run_manifest(
         enable_all=enable_all,
         duckdb_transport=duckdb_transport,
         plan_store=plans,
+        ledger=ledger,
+        resume=request,
     )
     executor.run()
+
+
+def _prepare_resume(
+    options: "ResumeOptions | None", root: Path | str, run_id: str
+) -> tuple[Any, Any]:
+    """Load the prior ledger and open this run's own.
+
+    The new ledger *inherits* the prior entries so that resuming a
+    resumed run still knows about the first run's work — otherwise
+    chaining two failures would cost the whole pipeline again.
+    """
+    if options is None:
+        return None, None
+    from dataclasses import replace
+
+    from src.ledger import RunLedger, load_resume_request
+
+    # `plan_dir` wins over `ResumeOptions.root` so plans and ledger for
+    # one run always land in the same directory.
+    request = load_resume_request(replace(options, root=str(root)))
+    if not options.record:
+        return None, request
+    ledger = RunLedger(root, run_id)
+    ledger.inherit(request.prior)
+    return ledger, request
 
 
 def _manifest_target(name: str) -> tuple[Any, Mapping[str, Any]]:

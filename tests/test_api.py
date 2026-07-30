@@ -328,3 +328,57 @@ class TestRunManifest:
         )
         kwargs = MockExecutor.call_args.kwargs
         assert kwargs['notifier_config'] == {}
+
+
+class TestPrepareResume:
+    """`run_manifest`'s resume wiring: one run id, one directory, and a
+    ledger that inherits what the previous run finished."""
+
+    def test_no_options_means_no_ledger_and_no_request(self):
+        from src.api import _prepare_resume
+
+        assert _prepare_resume(None, "reports/plans", "R1") == (None, None)
+
+    def test_ledger_and_plans_share_the_run_directory(self, tmp_path):
+        from src.api import _prepare_resume
+        from src.ledger import ResumeOptions
+
+        ledger, request = _prepare_resume(
+            ResumeOptions(start="qx"), tmp_path, "20260730T120000"
+        )
+        assert ledger.dir == tmp_path / "20260730T120000"
+        assert request.start == "qx"
+
+    def test_a_resumed_run_inherits_the_prior_ledger(self, tmp_path):
+        from src.api import _prepare_resume
+        from src.ledger import ResumeOptions, RunLedger, load_ledger
+
+        RunLedger(tmp_path, "R1").record(
+            step="alpha", source_sha="s", produces=None, seconds=1.0
+        )
+        ledger, request = _prepare_resume(
+            ResumeOptions(run_id="R1"), tmp_path, "R2"
+        )
+        assert [e.step for e in request.prior] == ["alpha"]
+        assert [e.run_id for e in load_ledger(tmp_path, "R2")] == ["R1"]
+
+    def test_plan_dir_overrides_the_options_root(self, tmp_path):
+        from src.api import _prepare_resume
+        from src.ledger import LedgerNotFoundError, ResumeOptions
+
+        # The ledger lives under plan_dir, so a stale `root` must not be
+        # what gets read — it would silently resume from the wrong place.
+        with pytest.raises(LedgerNotFoundError):
+            _prepare_resume(
+                ResumeOptions(run_id="R1", root="/nonexistent"), tmp_path, "R2"
+            )
+
+    def test_record_off_still_returns_the_window(self, tmp_path):
+        from src.api import _prepare_resume
+        from src.ledger import ResumeOptions
+
+        ledger, request = _prepare_resume(
+            ResumeOptions(start="qx", record=False), tmp_path, "R1"
+        )
+        assert ledger is None
+        assert request.start == "qx"

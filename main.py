@@ -201,6 +201,18 @@ def _show_plans(plan_dir: str, selector: str) -> None:
     print(format_summary(load_run(plan_dir, run_id)))
 
 
+def _list_ledger_runs(plan_dir: str) -> None:
+    """Print the run ids that can be resumed from."""
+    from src.ledger import list_ledger_runs
+
+    runs = list_ledger_runs(plan_dir)
+    if not runs:
+        print(f"No resumable runs under {plan_dir}.", file=sys.stderr)
+        sys.exit(1)
+    for run_id in runs:
+        print(run_id)
+
+
 def main():
     """
     Main entry point for the Database Task Orchestrator CLI.
@@ -305,13 +317,49 @@ def main():
         "--plan-dir",
         type=str,
         default=os.getenv("ORCH_PLAN_DIR", "reports/plans"),
-        help="Where captured plans live (default: reports/plans, or $ORCH_PLAN_DIR).",
+        help="Where captured plans and run ledgers live (default: "
+        "reports/plans, or $ORCH_PLAN_DIR).",
+    )
+
+    # Resume
+    parser.add_argument(
+        "--resume",
+        type=str,
+        metavar="RUN_ID",
+        help="Skip the steps a previous run's ledger proves are done. Pass "
+        "a run id, 'last' for the most recent run, or 'list' to list the "
+        "runs that have a ledger. Works on foreach-expanded step names, "
+        "which 'enabled: false' cannot reach.",
+    )
+    parser.add_argument(
+        "--from",
+        dest="from_step",
+        type=str,
+        metavar="SUBSTR",
+        help="Start at the first step whose name contains SUBSTR, over the "
+        "EXPANDED plan (e.g. --from qx_bkt03_year2019). Errors if nothing "
+        "matches — a typo must not turn into a full run.",
+    )
+    parser.add_argument(
+        "--until",
+        type=str,
+        metavar="SUBSTR",
+        help="Stop after the LAST step whose name contains SUBSTR, inclusive.",
+    )
+    parser.add_argument(
+        "--no-ledger",
+        action="store_true",
+        help="Do not record completed steps. The run is then not resumable.",
     )
 
     args = parser.parse_args()
 
     if args.plans is not None:
         _show_plans(args.plan_dir, args.plans)
+        return
+
+    if args.resume == "list":
+        _list_ledger_runs(args.plan_dir)
         return
 
     # Handle status/kill before anything else
@@ -401,6 +449,8 @@ def main():
         log.critical(f"Manifest file not found: {manifest_path}")
         sys.exit(1)
 
+    from src.ledger import ResumeOptions
+
     try:
         run_manifest(
             manifest_path,
@@ -411,6 +461,13 @@ def main():
             enable_all=args.enable_all,
             target=args.target,
             plan_dir=args.plan_dir,
+            resume=ResumeOptions(
+                run_id=args.resume,
+                start=args.from_step,
+                until=args.until,
+                root=args.plan_dir,
+                record=not args.no_ledger,
+            ),
         )
 
     except Exception as e:
