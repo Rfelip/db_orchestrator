@@ -118,6 +118,12 @@ in the parent repo. The ledger is what that runner never had.
   `produces:` is skipped and counted into `ResumeDecision.unverified`, which
   `format_resume_banner` prints at the point of use with the word TRUSTING. The
   gap is surfaced, never silent.
+- **A declared output's directory exists before the step runs.** The parent of
+  the rendered `produces:` is created (`parents=True, exist_ok=True`) ahead of
+  every step, on both the SQLAlchemy and the DuckDB path. This is what lets a
+  manifest be self-sufficient: `COPY … TO` creates no directory, so otherwise a
+  wrapper has to carry the folder list. A step without `produces:` declares no
+  output and gets none created.
 - **Chaining works.** A resumed run's ledger *inherits* the prior entries
   (keeping their original `run_id`), so resuming a resumed run still knows about
   the first run's work.

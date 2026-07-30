@@ -186,6 +186,59 @@ class TestManifestOnDuckDb:
         with pytest.raises(SystemExit):
             executor.run()
 
+    def test_produces_creates_its_directory_tree(
+        self, tmp_path, transport, monkeypatch
+    ):
+        """From nothing on disk, the plan alone lays out its own folders.
+
+        `COPY … TO` fails with IOException on a missing parent, and DuckDB's
+        partitioned write creates one level only — so `lake/tabuas` two levels
+        down is what proves the mkdir is recursive and not incidental.
+        """
+        monkeypatch.chdir(tmp_path)
+        sql = tmp_path / "s.sql"
+        sql.write_text(
+            "COPY (SELECT 1 AS v) TO '{{ out }}/tabuas/lookup.parquet' "
+            "(FORMAT 'parquet')",
+            encoding="utf-8",
+        )
+        part = tmp_path / "p.sql"
+        part.write_text(
+            "COPY (SELECT 0 AS bkt, 1 AS v) TO '{{ out }}/eventos/staged' "
+            "(FORMAT 'parquet', PARTITION_BY (bkt))",
+            encoding="utf-8",
+        )
+        out_dir = tmp_path / "never_created" / "lake"
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text(
+            f"""
+steps:
+  - name: lookup
+    type: sql
+    file: "{sql}"
+    params: {{ out: "{out_dir}" }}
+    produces: "{{{{ out }}}}/tabuas/lookup.parquet"
+  - name: staged
+    type: sql
+    file: "{part}"
+    params: {{ out: "{out_dir}" }}
+    produces: "{{{{ out }}}}/eventos/staged"
+""",
+            encoding="utf-8",
+        )
+        assert not out_dir.exists()
+
+        Executor(
+            manifest_path=manifest,
+            db_config={},
+            notifier_config={},
+            force=True,
+            duckdb_transport=transport,
+        ).run()
+
+        assert (out_dir / "tabuas" / "lookup.parquet").exists()
+        assert (out_dir / "eventos" / "staged" / "bkt=0").is_dir()
+
     def test_no_dsn_is_built_for_a_duckdb_run(self, tmp_path, transport):
         # The old constructor exploded on an empty db_config because it
         # always built a SQLAlchemy URL.

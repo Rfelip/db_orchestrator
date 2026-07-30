@@ -251,6 +251,15 @@ it re-runs. Without `produces:`, resume skips the step and says so in the
 banner rather than implying it checked. `produces:` checks existence, not
 contents — a truncated file from a killed writer still passes.
 
+`produces:` also does one thing before the step runs: **its directory is
+created** (`mkdir -p` on the parent), so a plan can build its output tree
+from nothing. `COPY … TO '<path>'` creates no parent directory, and DuckDB's
+partitioned write creates a single level — without this, every manifest that
+writes files needs a wrapper script to lay out the folders first, and that
+hand-written list is what drifts. Declaring the path is enough; nothing else
+declares the folders. Both assume the executor sees the same filesystem the
+step writes to, which is the same assumption resume makes.
+
 ### `--from` / `--until` — just this part
 
 Substring match over the **expanded** plan, the ergonomics the old

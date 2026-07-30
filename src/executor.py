@@ -324,6 +324,27 @@ class Executor:
         skipped = set(decision.skip)
         return [s for s in window if s.name not in skipped]
 
+    def _prepare_output_dir(self, step) -> None:
+        """Create the directory a step's declared `produces:` lives in.
+
+        `COPY … TO '<path>'` does not create parent directories, and DuckDB's
+        partitioned write creates exactly one level, so a manifest whose every
+        output path is declared still could not build a tree from nothing —
+        the plan needed a wrapper to mkdir for it first. Deriving the
+        directory from `produces:` removes that pre-flight: the declaration
+        that already exists for resume answers it too, and there is no second
+        list to drift.
+
+        Same filesystem assumption `produces:` already makes for `--resume`,
+        which stats the path from the process running the executor. An
+        executor split from its data by a network is out of scope for both.
+        """
+        if not step.produces:
+            return
+        Path(render_template(step.produces, step.params)).parent.mkdir(
+            parents=True, exist_ok=True
+        )
+
     def _step_evidence(self, step):
         """Gather what is knowable about one planned step: its SQL
         fingerprint, and whether its declared output is still there."""
@@ -378,6 +399,7 @@ class Executor:
             for step in execution_queue:
                 start_time = time.time()
                 try:
+                    self._prepare_output_dir(step)
                     self._dispatch_duckdb_step(step, session)
                 except Exception as exc:
                     self._handle_step_error(step, exc, None, notify=True)
@@ -512,6 +534,8 @@ class Executor:
         current_group = None
 
         for item_type, payload in self._coalesce_into_items(execution_queue):
+            for planned in payload:
+                self._prepare_output_dir(planned)
             if item_type == "joined":
                 current_session, current_group = self._close_session(
                     current_session,
