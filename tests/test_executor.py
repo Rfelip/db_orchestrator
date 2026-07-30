@@ -53,25 +53,26 @@ class TestJoinedGroup(unittest.TestCase):
         # YAML/notifier/reporter. Crie uma instância "vazia" via __new__.
         self.executor = Executor.__new__(Executor)
         self.executor.db_config = {
-            'dialect': 'postgresql+psycopg2',
-            'container_name': 'pgduckdb',
-            'user': 'postgres',
-            'password': 'x',
-            'host': 'localhost',
-            'port': '5434',
-            'database': 'labma',
-            'docker_sudo': True,
+            "dialect": "postgresql+psycopg2",
+            "container_name": "pgduckdb",
+            "user": "postgres",
+            "password": "x",
+            "host": "localhost",
+            "port": "5434",
+            "database": "labma",
+            "docker_sudo": True,
         }
         self.executor.reporter = MagicMock()
 
     def test_joined_group_rejects_mixed_types(self):
         from src.executor import Executor as Exec
         from unittest.mock import patch as _patch
+
         # _execute_joined_psql_group itself doesn't validate types — that's done
         # by the caller (_run_steps). Test via _run_steps with a stub.
         steps = [
-            _step(name='a', type='psql',   file='/tmp/x.sql', joined_group='g1'),
-            _step(name='b', type='python', file='/tmp/x.py',  joined_group='g1'),
+            _step(name="a", type="psql", file="/tmp/x.sql", joined_group="g1"),
+            _step(name="b", type="python", file="/tmp/x.py", joined_group="g1"),
         ]
         ym = MagicMock()
         ym.disable_step = MagicMock()
@@ -82,70 +83,72 @@ class TestJoinedGroup(unittest.TestCase):
             self.executor._run_steps(steps, MagicMock(), ym, notify=False)
         self.assertIn("must contain only", str(ctx.exception))
 
-    @patch('src.executor.subprocess.run')
-    @patch('src.executor.SQLParser.read_sql_file')
+    @patch("src.executor.subprocess.run")
+    @patch("src.executor.SQLParser.read_sql_file")
     def test_joined_group_concatenates_and_calls_once(self, mock_read, mock_run):
         # Two psql files → one subprocess call.
         mock_read.side_effect = ["SELECT 1;", "SELECT 2;"]
-        mock_run.return_value = MagicMock(returncode=0, stdout=b'', stderr=b'')
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
 
         # File existence check uses Path(...).exists(), patch it via tmp files.
-        with patch('src.executor.Path') as mock_path:
+        with patch("src.executor.Path") as mock_path:
             instance = MagicMock()
             instance.exists.return_value = True
             mock_path.return_value = instance
 
             group = [
-                _step(name='phase1', type='psql', file='/tmp/p1.sql', joined_group='mq'),
-                _step(name='phase2', type='psql', file='/tmp/p2.sql', joined_group='mq'),
+                _step(
+                    name="phase1", type="psql", file="/tmp/p1.sql", joined_group="mq"
+                ),
+                _step(
+                    name="phase2", type="psql", file="/tmp/p2.sql", joined_group="mq"
+                ),
             ]
             records = self.executor._execute_joined_psql_group(group)
 
         self.assertEqual(len(records), 2)
-        self.assertEqual(records[0]['name'], 'phase1')
-        self.assertEqual(records[1]['name'], 'phase2')
+        self.assertEqual(records[0]["name"], "phase1")
+        self.assertEqual(records[1]["name"], "phase2")
         # Exactly one psql call regardless of number of fragments.
         self.assertEqual(mock_run.call_count, 1)
         # The stdin payload contains both fragments separated by ';'.
         call = mock_run.call_args
-        stdin_payload = call.kwargs['input'].decode('utf-8')
+        stdin_payload = call.kwargs["input"].decode("utf-8")
         self.assertIn("SELECT 1", stdin_payload)
         self.assertIn("SELECT 2", stdin_payload)
         self.assertIn(";", stdin_payload)
 
-    @patch('src.executor.subprocess.run')
-    @patch('src.executor.SQLParser.read_sql_file')
+    @patch("src.executor.subprocess.run")
+    @patch("src.executor.SQLParser.read_sql_file")
     def test_joined_group_propagates_psql_failure(self, mock_read, mock_run):
         mock_read.return_value = "SELECT 1;"
-        mock_run.return_value = MagicMock(returncode=1, stdout=b'', stderr=b'oh no')
+        mock_run.return_value = MagicMock(returncode=1, stdout=b"", stderr=b"oh no")
 
-        with patch('src.executor.Path') as mock_path:
+        with patch("src.executor.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
 
-            group = [_step(name='a', type='psql', file='/tmp/x.sql', joined_group='g')]
+            group = [_step(name="a", type="psql", file="/tmp/x.sql", joined_group="g")]
             with self.assertRaises(Exception):
                 self.executor._execute_joined_psql_group(group)
+
 
 class TestExecutor(unittest.TestCase):
     def setUp(self):
         self.manifest_path = "dummy_manifest.yaml"
         self.db_config = {
-            'dialect': 'sqlite',
-            'user': 'user',
-            'password': 'password',
-            'host': 'localhost',
-            'port': '5432',
-            'service': 'db'
+            "dialect": "sqlite",
+            "user": "user",
+            "password": "password",
+            "host": "localhost",
+            "port": "5432",
+            "service": "db",
         }
-        self.notifier_config = {
-            'token': '123',
-            'chat_id': '456'
-        }
+        self.notifier_config = {"token": "123", "chat_id": "456"}
 
-    @patch('src.executor.YamlManager')
-    @patch('src.executor.build_notifier')
-    @patch('src.executor.DatabaseManager')
-    @patch('src.executor.Reporter')
+    @patch("src.executor.YamlManager")
+    @patch("src.executor.build_notifier")
+    @patch("src.executor.DatabaseManager")
+    @patch("src.executor.Reporter")
     def test_init(self, MockReporter, MockDB, MockNotifier, MockYaml):
         executor = Executor(self.manifest_path, self.db_config, self.notifier_config)
         self.assertIsNotNone(executor)
@@ -153,45 +156,57 @@ class TestExecutor(unittest.TestCase):
         MockNotifier.assert_called()
         MockReporter.assert_called()
 
-    @patch('src.executor.YamlManager')
-    @patch('src.executor.build_notifier')
-    @patch('src.executor.DatabaseManager')
-    @patch('src.executor.Reporter')
+    @patch("src.executor.YamlManager")
+    @patch("src.executor.build_notifier")
+    @patch("src.executor.DatabaseManager")
+    @patch("src.executor.Reporter")
     def test_run_no_steps(self, MockReporter, MockDB, MockNotifier, MockYaml):
         # Setup mock manifest
         mock_yaml_instance = MockYaml.return_value
         mock_yaml_instance.load_manifest.return_value = _manifest()
 
         executor = Executor(self.manifest_path, self.db_config, self.notifier_config)
-        
+
         executor.run()
-        
+
         MockDB.assert_not_called()
 
-    @patch('src.executor.YamlManager')
-    @patch('src.executor.build_notifier')
-    @patch('src.executor.DatabaseManager')
-    @patch('builtins.input', return_value='y')
-    @patch('src.executor.SQLParser')
-    @patch('src.executor.render_template')
-    @patch('src.executor.Reporter')
-    @patch('src.executor.OracleMonitorProfiler')
-    def test_run_sql_step_success_oracle(self, MockOracleProfiler, MockReporter, mock_render, mock_parser, mock_input, MockDB, MockNotifier, MockYaml):
+    @patch("src.executor.YamlManager")
+    @patch("src.executor.build_notifier")
+    @patch("src.executor.DatabaseManager")
+    @patch("builtins.input", return_value="y")
+    @patch("src.executor.SQLParser")
+    @patch("src.executor.render_template")
+    @patch("src.executor.Reporter")
+    @patch("src.executor.OracleMonitorProfiler")
+    def test_run_sql_step_success_oracle(
+        self,
+        MockOracleProfiler,
+        MockReporter,
+        mock_render,
+        mock_parser,
+        mock_input,
+        MockDB,
+        MockNotifier,
+        MockYaml,
+    ):
         # Setup steps
-        steps = [_step(
-            name='Test SQL',
-            file='test.sql',
-            type='sql',
-            transaction_group='tg1',
-        )]
+        steps = [
+            _step(
+                name="Test SQL",
+                file="test.sql",
+                type="sql",
+                transaction_group="tg1",
+            )
+        ]
         mock_yaml_instance = MockYaml.return_value
         mock_yaml_instance.load_manifest.return_value = _manifest(*steps)
-        
+
         # Setup DB
         mock_db_instance = MockDB.return_value
         mock_session = MagicMock()
         mock_db_instance.get_session.return_value = mock_session
-        
+
         # Setup Parser
         mock_parser.read_sql_file.return_value = "SELECT 1"
         mock_render.return_value = "SELECT 1"
@@ -203,11 +218,11 @@ class TestExecutor(unittest.TestCase):
 
         # Set dialect to Oracle
         db_config_oracle = self.db_config.copy()
-        db_config_oracle['dialect'] = 'oracle+cx_oracle'
+        db_config_oracle["dialect"] = "oracle+cx_oracle"
 
         executor = Executor(self.manifest_path, db_config_oracle, self.notifier_config)
         executor.run()
-        
+
         # Verify DB calls
         MockDB.assert_called()
         # Verify profiler usage
@@ -217,50 +232,59 @@ class TestExecutor(unittest.TestCase):
         # Verify reporter usage
         MockReporter.return_value.add_task_result.assert_called()
         MockReporter.return_value.generate_report.assert_called()
-        
-        mock_yaml_instance.disable_step.assert_called_with('Test SQL')
-        
-    @patch('src.executor.YamlManager')
-    @patch('src.executor.build_notifier')
-    @patch('src.executor.DatabaseManager')
-    @patch('builtins.input', return_value='n')
-    @patch('src.executor.Reporter')
-    def test_run_user_abort(self, MockReporter, mock_input, MockDB, MockNotifier, MockYaml):
-        steps = [_step(name='S1', type='sql', file='x.sql')]
+
+        mock_yaml_instance.disable_step.assert_called_with("Test SQL")
+
+    @patch("src.executor.YamlManager")
+    @patch("src.executor.build_notifier")
+    @patch("src.executor.DatabaseManager")
+    @patch("builtins.input", return_value="n")
+    @patch("src.executor.Reporter")
+    def test_run_user_abort(
+        self, MockReporter, mock_input, MockDB, MockNotifier, MockYaml
+    ):
+        steps = [_step(name="S1", type="sql", file="x.sql")]
         MockYaml.return_value.load_manifest.return_value = _manifest(*steps)
-        
+
         executor = Executor(self.manifest_path, self.db_config, self.notifier_config)
-        
+
         with self.assertRaises(SystemExit) as cm:
             executor.run()
-        
+
         self.assertEqual(cm.exception.code, 0)
         MockDB.assert_not_called()
 
-    @patch('src.executor.YamlManager')
-    @patch('src.executor.build_notifier')
-    @patch('src.executor.DatabaseManager')
-    @patch('builtins.input', return_value='y')
-    @patch('src.executor.subprocess.run')
-    @patch('src.executor.Reporter')
-    def test_run_python_step(self, MockReporter, mock_subprocess, mock_input, MockDB, MockNotifier, MockYaml):
-         steps = [_step(
-            name='Test Py',
-            file='script.py',
-            type='python',
-        )]
-         MockYaml.return_value.load_manifest.return_value = _manifest(*steps)
-         
-         # Mock file existence check
-         with patch('src.executor.Path.exists', return_value=True):
-             executor = Executor(self.manifest_path, self.db_config, self.notifier_config)
-             executor.run()
-             
-             mock_subprocess.assert_called()
-             MockYaml.return_value.disable_step.assert_called_with('Test Py')
-             # Reporter should generate report even if only python steps run? 
-             # Current implementation calls generate_report at the end of run()
-             MockReporter.return_value.generate_report.assert_called()
+    @patch("src.executor.YamlManager")
+    @patch("src.executor.build_notifier")
+    @patch("src.executor.DatabaseManager")
+    @patch("builtins.input", return_value="y")
+    @patch("src.executor.subprocess.run")
+    @patch("src.executor.Reporter")
+    def test_run_python_step(
+        self, MockReporter, mock_subprocess, mock_input, MockDB, MockNotifier, MockYaml
+    ):
+        steps = [
+            _step(
+                name="Test Py",
+                file="script.py",
+                type="python",
+            )
+        ]
+        MockYaml.return_value.load_manifest.return_value = _manifest(*steps)
 
-if __name__ == '__main__':
+        # Mock file existence check
+        with patch("src.executor.Path.exists", return_value=True):
+            executor = Executor(
+                self.manifest_path, self.db_config, self.notifier_config
+            )
+            executor.run()
+
+            mock_subprocess.assert_called()
+            MockYaml.return_value.disable_step.assert_called_with("Test Py")
+            # Reporter should generate report even if only python steps run?
+            # Current implementation calls generate_report at the end of run()
+            MockReporter.return_value.generate_report.assert_called()
+
+
+if __name__ == "__main__":
     unittest.main()

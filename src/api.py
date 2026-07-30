@@ -13,6 +13,7 @@ Two public functions for downstream callers:
 The transport layer (`src/transport.py`) is the part that varies. The
 api owns the contract every caller sees: types, validation, logging.
 """
+
 from __future__ import annotations
 
 import csv
@@ -40,7 +41,7 @@ log = logging.getLogger(__name__)
 
 
 _FORBIDDEN_DQL_PATTERNS = re.compile(
-    r'^\s*(CREATE|DROP|ALTER|TRUNCATE|INSERT|UPDATE|DELETE|MERGE|GRANT|REVOKE|EXEC|EXECUTE|CALL)\b',
+    r"^\s*(CREATE|DROP|ALTER|TRUNCATE|INSERT|UPDATE|DELETE|MERGE|GRANT|REVOKE|EXEC|EXECUTE|CALL)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -60,6 +61,7 @@ class QueryResult:
     not engine setup or session creation. `sql_hash` is a short SHA-256
     prefix of the rendered SQL — matches the prefix written to the
     ad-hoc provenance log so callers can grep back."""
+
     columns: list[str]
     rows: list[tuple]
     elapsed_ms: int
@@ -96,7 +98,7 @@ def _check_dql(sql: str) -> None:
 
 def _apply_limit(sql: str, limit: int, dialect: str) -> str:
     """Wrap `sql` in a row-limiter compatible with the dialect."""
-    if 'oracle' in dialect:
+    if "oracle" in dialect:
         return f"SELECT * FROM ({sql}) WHERE ROWNUM <= {int(limit)}"
     return f"SELECT * FROM ({sql}) sub LIMIT {int(limit)}"
 
@@ -127,6 +129,7 @@ def _resolve_target(name: str) -> dict[str, Any]:
     Raises ValueError if the name isn't registered. Lazy import keeps
     the api module independent of config at import time."""
     from config.settings import load_targets
+
     targets = load_targets()
     if name not in targets:
         raise ValueError(
@@ -259,7 +262,7 @@ def run_sql(
         # We can only safely wrap when we know the dialect — that comes
         # from db_config. For ssh+wsl without db_config the caller must
         # add their own LIMIT.
-        dialect = (db_config or {}).get('dialect', '')
+        dialect = (db_config or {}).get("dialect", "")
         if dialect:
             rendered = _apply_limit(rendered, limit, dialect)
 
@@ -270,11 +273,15 @@ def run_sql(
         tp = build_transport(
             db_config=db_config,
             transport=transport,
-            ssh=ssh, container=container,
-            pg_user=pg_user, pg_database=pg_database,
+            ssh=ssh,
+            container=container,
+            pg_user=pg_user,
+            pg_database=pg_database,
             ch_database=ch_database,
-            wsl=wsl, sudo=sudo,
-            helper_path=helper_path, threads=threads,
+            wsl=wsl,
+            sudo=sudo,
+            helper_path=helper_path,
+            threads=threads,
             settings=settings,
             python=python,
         )
@@ -287,29 +294,35 @@ def run_sql(
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - start) * 1000)
         if log_provenance:
-            _write_ad_hoc_provenance({
+            _write_ad_hoc_provenance(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "fetch": fetch_name,
+                    "transport": tp.name,
+                    "sql_hash": sql_hash,
+                    "elapsed_ms": elapsed_ms,
+                    "rows": 0,
+                    "status": "error",
+                    "error": str(exc)[:500],
+                },
+                repo_root=repo_root,
+            )
+        raise
+
+    if log_provenance:
+        _write_ad_hoc_provenance(
+            {
                 "ts": datetime.now().isoformat(timespec="seconds"),
                 "fetch": fetch_name,
                 "transport": tp.name,
                 "sql_hash": sql_hash,
-                "elapsed_ms": elapsed_ms,
-                "rows": 0,
-                "status": "error",
-                "error": str(exc)[:500],
-            }, repo_root=repo_root)
-        raise
-
-    if log_provenance:
-        _write_ad_hoc_provenance({
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "fetch": fetch_name,
-            "transport": tp.name,
-            "sql_hash": sql_hash,
-            "elapsed_ms": raw.elapsed_ms,
-            "rows": len(raw.rows),
-            "status": "ok",
-            "error": None,
-        }, repo_root=repo_root)
+                "elapsed_ms": raw.elapsed_ms,
+                "rows": len(raw.rows),
+                "status": "ok",
+                "error": None,
+            },
+            repo_root=repo_root,
+        )
 
     return QueryResult(
         columns=raw.columns,
