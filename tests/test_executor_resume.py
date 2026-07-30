@@ -355,3 +355,24 @@ class TestBackwardCompatibility:
         ran, _ = _run(manifest, transport, tmp_path, "R1", record=False)
         assert ran == ["alpha", "beta", "fan_bkt0", "fan_bkt1"]
         assert not (tmp_path / "runs" / "R1" / "ledger.jsonl").exists()
+
+
+class TestMisdeclaredProduces:
+    def test_a_produces_that_never_appears_is_flagged_at_the_time(
+        self, tmp_path, transport, monkeypatch, caplog
+    ):
+        # A wrong `produces:` would otherwise only surface at the next
+        # resume, looking exactly like a deleted file.
+        monkeypatch.chdir(tmp_path)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        sql = _write_sql(tmp_path, "s.sql", "SELECT 1")
+        manifest = tmp_path / "m.yaml"
+        manifest.write_text(
+            f'steps:\n  - {{name: s, type: sql, file: "{sql}", '
+            f'produces: "{out_dir}/never.parquet"}}\n',
+            encoding="utf-8",
+        )
+        _run(manifest, transport, tmp_path, "R1")
+        assert "declared produces" in caplog.text
+        assert "Resume will re-run it" in caplog.text

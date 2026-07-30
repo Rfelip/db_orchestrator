@@ -8,6 +8,13 @@ from pathlib import Path
 from datetime import datetime
 
 from src.database import DatabaseManager
+from src.ledger import (
+    StepCheck,
+    decide_resume,
+    format_resume_banner,
+    select_window,
+    source_fingerprint,
+)
 from src.yaml_manager import YamlManager
 from src.parser import SQLParser
 from src.notifier import build_notifier
@@ -290,7 +297,6 @@ class Executor:
         """
         if self.resume is None:
             return queue
-        from src.ledger import decide_resume, format_resume_banner, select_window
 
         names = [s.name for s in queue]
         first, stop = select_window(
@@ -321,7 +327,6 @@ class Executor:
     def _step_evidence(self, step):
         """Gather what is knowable about one planned step: its SQL
         fingerprint, and whether its declared output is still there."""
-        from src.ledger import StepCheck, source_fingerprint
 
         produces = (
             render_template(step.produces, step.params) if step.produces else None
@@ -339,6 +344,13 @@ class Executor:
         if self.ledger is None:
             return
         evidence = self._step_evidence(step)
+        if evidence.output_present is False:
+            # Caught here rather than at the next resume, where it would
+            # look like a deleted file instead of a wrong declaration.
+            log.warning(
+                f"Step '{step.name}' declared produces: {evidence.produces} "
+                f"but nothing is there. Resume will re-run it."
+            )
         try:
             self.ledger.record(
                 step=step.name,
