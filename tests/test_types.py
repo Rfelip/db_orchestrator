@@ -252,3 +252,26 @@ class TestForeach:
     def test_axis_name_must_be_an_identifier(self):
         with pytest.raises(ValueError, match="not a valid param name"):
             Step.from_dict({"name": "x", "type": "sql", "foreach": {"a b": [1]}})
+
+
+class TestProduces:
+    """`produces:` is the resume witness — a path template, per expansion."""
+
+    def test_defaults_to_none_meaning_nothing_to_check(self):
+        assert Step.from_dict({"name": "x", "type": "sql"}).produces is None
+
+    def test_survives_foreach_expansion_unrendered(self):
+        # Rendering happens at the point of use, with the merged params,
+        # so each expansion resolves to its own path.
+        step = Step.from_dict(
+            {
+                "name": "qx",
+                "type": "sql",
+                "produces": "{{ out }}/qx_{{ bkt }}.parquet",
+                "params": {"out": "/lake"},
+                "foreach": {"bkt": [0, 1]},
+            }
+        )
+        expanded = expand_foreach(step)
+        assert [e.produces for e in expanded] == ["{{ out }}/qx_{{ bkt }}.parquet"] * 2
+        assert [e.params["bkt"] for e in expanded] == [0, 1]

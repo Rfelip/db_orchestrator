@@ -56,6 +56,7 @@ _RECOGNISED_KEYS = frozenset(
         "cleanup_mode",
         "profile",
         "output_file",
+        "produces",
         "notify",
         "ping_on_end",
         "ping_on_error",
@@ -103,6 +104,14 @@ class Step:
 
     # sql/plsql output
     output_file: str | None = None
+
+    # What the step leaves on disk, as a path template rendered with the
+    # step's params (`"{{ out }}/tabuas/qx_bkt{{ bkt }}.parquet"`). Purely
+    # a resume witness: declaring it lets `--resume` CHECK that a
+    # completed step's output survived instead of trusting it. Steps that
+    # write via `COPY … TO` — which the orchestrator cannot see into —
+    # are exactly the ones worth declaring.
+    produces: str | None = None
 
     # Notification controls
     notify: bool = False
@@ -172,6 +181,7 @@ class Step:
             cleanup_mode=cleanup_mode,
             profile=bool(raw.get("profile", False)),
             output_file=raw.get("output_file"),
+            produces=raw.get("produces"),
             notify=bool(raw.get("notify", False)),
             ping_on_end=raw.get("ping_on_end"),
             ping_on_error=raw.get("ping_on_error"),
@@ -281,10 +291,13 @@ class ManifestConfig:
         if len(steps) != len(declared):
             # Expanded names exist nowhere in the source YAML, so
             # `YamlManager.disable_step` can never match them: a foreach
-            # manifest is never rewritten, and never resumable that way.
-            log.warning(
+            # manifest is never rewritten. Resume for these steps is the
+            # run ledger (`src/ledger.py`, `--resume`), which keys off the
+            # expanded plan rather than off the source file.
+            log.info(
                 "foreach expanded %d declared steps into %d — expanded steps "
-                "are not auto-disabled in the manifest on completion.",
+                "are not auto-disabled in the manifest; use --resume to skip "
+                "completed ones.",
                 len(declared),
                 len(steps),
             )
