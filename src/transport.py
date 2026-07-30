@@ -16,6 +16,7 @@ Two implementations live here:
 Both transports return a `RawResult` with columns + rows + elapsed_ms.
 The `run_sql` entry point in `src.api` picks one and types the output.
 """
+
 from __future__ import annotations
 
 import csv
@@ -37,6 +38,7 @@ class RawResult:
     """The shape every transport returns. `run_sql` wraps this into the
     public `QueryResult` after computing a SQL hash and writing
     provenance."""
+
     columns: list[str]
     rows: list[tuple]
     elapsed_ms: int
@@ -49,7 +51,9 @@ class Transport(Protocol):
     """Short identifier used in provenance lines (e.g. 'direct',
     'ssh+wsl+pgduckdb')."""
 
-    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult: ...
+    def execute(
+        self, sql: str, params: Mapping[str, Any] | None = None
+    ) -> RawResult: ...
 
 
 class DirectTransport:
@@ -65,21 +69,20 @@ class DirectTransport:
     def __init__(self, db_config: Mapping[str, Any]) -> None:
         self._db_config = dict(db_config)
 
-    def execute(self, sql: str,
-                 params: Mapping[str, Any] | None = None) -> RawResult:
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
         url = _build_db_url(self._db_config)
         db = DatabaseManager(url)
         session = db.get_session()
         try:
             log.info("DirectTransport executing (%d chars)...", len(sql))
             start = time.monotonic()
-            result = db.execute_query(sql, params=dict(params) if params else None,
-                                        session=session)
+            result = db.execute_query(
+                sql, params=dict(params) if params else None, session=session
+            )
             columns = list(result.keys())
             rows = [tuple(r) for r in result.fetchall()]
             elapsed_ms = int((time.monotonic() - start) * 1000)
-            log.info("DirectTransport returned %d rows (%dms).",
-                      len(rows), elapsed_ms)
+            log.info("DirectTransport returned %d rows (%dms).", len(rows), elapsed_ms)
             return RawResult(columns=columns, rows=rows, elapsed_ms=elapsed_ms)
         finally:
             session.close()
@@ -108,12 +111,17 @@ class SshWslTransport:
 
     name = "ssh+wsl"
 
-    def __init__(self, *, ssh: str, container: str,
-                 pg_user: str = "postgres",
-                 pg_database: str = "postgres",
-                 wsl: bool = True,
-                 sudo: bool = True,
-                 ssh_options: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ssh: str,
+        container: str,
+        pg_user: str = "postgres",
+        pg_database: str = "postgres",
+        wsl: bool = True,
+        sudo: bool = True,
+        ssh_options: list[str] | None = None,
+    ) -> None:
         self.ssh = ssh
         self.container = container
         self.pg_user = pg_user
@@ -122,8 +130,7 @@ class SshWslTransport:
         self.sudo = sudo
         self.ssh_options = list(ssh_options or [])
 
-    def execute(self, sql: str,
-                 params: Mapping[str, Any] | None = None) -> RawResult:
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
         if params:
             # SQLAlchemy-style :name binding doesn't survive a raw psql
             # call. Callers that need parameter substitution should
@@ -134,8 +141,12 @@ class SshWslTransport:
                 "Render the SQL before calling execute()."
             )
         cmd = self._build_command()
-        log.info("SshWslTransport executing on %s/%s (%d chars)...",
-                  self.ssh, self.container, len(sql))
+        log.info(
+            "SshWslTransport executing on %s/%s (%d chars)...",
+            self.ssh,
+            self.container,
+            len(sql),
+        )
         start = time.monotonic()
         proc = subprocess.run(
             cmd,
@@ -147,8 +158,7 @@ class SshWslTransport:
         if proc.returncode != 0:
             stderr = proc.stderr.decode("utf-8", errors="replace")
             raise RuntimeError(
-                f"ssh+wsl psql failed (rc={proc.returncode}): "
-                f"{stderr[:500]}"
+                f"ssh+wsl psql failed (rc={proc.returncode}): {stderr[:500]}"
             )
         body = proc.stdout.decode("utf-8", errors="replace")
         columns, rows = _parse_psql_csv(body)
@@ -159,14 +169,25 @@ class SshWslTransport:
         ssh_part = ["ssh"] + self.ssh_options + [self.ssh]
         wrapper = ["wsl"] if self.wsl else []
         docker_part = (["sudo"] if self.sudo else []) + [
-            "docker", "exec", "-i", self.container,
-            "psql", "-U", self.pg_user, "-d", self.pg_database,
-            "-v", "ON_ERROR_STOP=1", "--csv", "-f", "-",
+            "docker",
+            "exec",
+            "-i",
+            self.container,
+            "psql",
+            "-U",
+            self.pg_user,
+            "-d",
+            self.pg_database,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "--csv",
+            "-f",
+            "-",
         ]
         return ssh_part + wrapper + docker_part
 
 
-_DUCKDB_HELPER = '''\
+_DUCKDB_HELPER = """\
 import csv, sys, duckdb
 con = duckdb.connect()
 con.execute("SET threads=%d")
@@ -177,7 +198,7 @@ w = csv.writer(sys.stdout, lineterminator="\\n")
 w.writerow(cols)
 for row in cur.fetchall():
     w.writerow(row)
-'''
+"""
 """Remote program for `DuckDbSshTransport`: reads SQL from stdin, runs it
 through DuckDB on the remote host, writes CSV (lowercased headers) to
 stdout. Uploaded to the host once per process."""
@@ -206,12 +227,16 @@ class DuckDbSshTransport:
 
     name = "ssh+duckdb"
 
-    def __init__(self, *, ssh: str,
-                 helper_path: str = "/tmp/_orch_duckdb.py",
-                 wsl: bool = True,
-                 threads: int = 8,
-                 python: str = "python3",
-                 ssh_options: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ssh: str,
+        helper_path: str = "/tmp/_orch_duckdb.py",
+        wsl: bool = True,
+        threads: int = 8,
+        python: str = "python3",
+        ssh_options: list[str] | None = None,
+    ) -> None:
         self.ssh = ssh
         self.helper_path = helper_path
         self.wsl = wsl
@@ -233,7 +258,9 @@ class DuckDbSshTransport:
         body = (_DUCKDB_HELPER % self.threads).encode("utf-8")
         proc = subprocess.run(
             self._ssh_prefix() + ["tee", self.helper_path],
-            input=body, capture_output=True, check=False,
+            input=body,
+            capture_output=True,
+            check=False,
         )
         if proc.returncode != 0:
             raise RuntimeError(
@@ -242,8 +269,7 @@ class DuckDbSshTransport:
             )
         self._helper_synced = True
 
-    def execute(self, sql: str,
-                 params: Mapping[str, Any] | None = None) -> RawResult:
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
         if params:
             raise NotImplementedError(
                 "DuckDbSshTransport does not support :name bind params. "
@@ -251,11 +277,13 @@ class DuckDbSshTransport:
             )
         self._ensure_helper()
         cmd = self._ssh_prefix() + [self.python, self.helper_path]
-        log.info("DuckDbSshTransport executing on %s (%d chars)...",
-                  self.ssh, len(sql))
+        log.info("DuckDbSshTransport executing on %s (%d chars)...", self.ssh, len(sql))
         start = time.monotonic()
         proc = subprocess.run(
-            cmd, input=sql.encode("utf-8"), capture_output=True, check=False,
+            cmd,
+            input=sql.encode("utf-8"),
+            capture_output=True,
+            check=False,
         )
         elapsed_ms = int((time.monotonic() - start) * 1000)
         if proc.returncode != 0:
@@ -305,15 +333,20 @@ class ClickHouseSshTransport:
 
     name = "ssh+clickhouse"
 
-    def __init__(self, *, ssh: str, container: str,
-                 ch_database: str | None = None,
-                 wsl: bool = True,
-                 sudo: bool = True,
-                 max_threads: int = 4,
-                 max_bytes_before_external_group_by: int = 2_000_000_000,
-                 join_algorithm: str = "grace_hash",
-                 max_memory_usage: int = 22_000_000_000,
-                 ssh_options: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ssh: str,
+        container: str,
+        ch_database: str | None = None,
+        wsl: bool = True,
+        sudo: bool = True,
+        max_threads: int = 4,
+        max_bytes_before_external_group_by: int = 2_000_000_000,
+        join_algorithm: str = "grace_hash",
+        max_memory_usage: int = 22_000_000_000,
+        ssh_options: list[str] | None = None,
+    ) -> None:
         self.ssh = ssh
         self.container = container
         self.ch_database = ch_database
@@ -325,16 +358,19 @@ class ClickHouseSshTransport:
         self.max_memory_usage = max_memory_usage
         self.ssh_options = list(ssh_options or [])
 
-    def execute(self, sql: str,
-                 params: Mapping[str, Any] | None = None) -> RawResult:
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
         if params:
             raise NotImplementedError(
                 "ClickHouseSshTransport does not support :name bind params. "
                 "Render the SQL before calling execute()."
             )
         cmd = self._build_command()
-        log.info("ClickHouseSshTransport executing on %s/%s (%d chars)...",
-                  self.ssh, self.container, len(sql))
+        log.info(
+            "ClickHouseSshTransport executing on %s/%s (%d chars)...",
+            self.ssh,
+            self.container,
+            len(sql),
+        )
         start = time.monotonic()
         proc = subprocess.run(
             cmd,
@@ -351,8 +387,9 @@ class ClickHouseSshTransport:
             )
         body = proc.stdout.decode("utf-8", errors="replace")
         columns, rows = _parse_psql_csv(body)
-        log.info("ClickHouseSshTransport returned %d rows (%dms).",
-                  len(rows), elapsed_ms)
+        log.info(
+            "ClickHouseSshTransport returned %d rows (%dms).", len(rows), elapsed_ms
+        )
         return RawResult(columns=columns, rows=rows, elapsed_ms=elapsed_ms)
 
     def _build_command(self) -> list[str]:
@@ -360,7 +397,8 @@ class ClickHouseSshTransport:
         wrapper = ["wsl"] if self.wsl else []
         client = [
             "clickhouse-client",
-            "--format", "CSVWithNames",
+            "--format",
+            "CSVWithNames",
             "--multiquery",
             f"--max_threads={self.max_threads}",
             "--max_bytes_before_external_group_by="
@@ -370,9 +408,16 @@ class ClickHouseSshTransport:
         ]
         if self.ch_database:
             client += ["-d", self.ch_database]
-        docker_part = (["sudo"] if self.sudo else []) + [
-            "docker", "exec", "-i", self.container,
-        ] + client
+        docker_part = (
+            (["sudo"] if self.sudo else [])
+            + [
+                "docker",
+                "exec",
+                "-i",
+                self.container,
+            ]
+            + client
+        )
         return ssh_part + wrapper + docker_part
 
 
@@ -409,15 +454,21 @@ def build_transport(
                 "`container` (docker container name)."
             )
         return SshWslTransport(
-            ssh=ssh, container=container,
-            pg_user=pg_user, pg_database=pg_database,
-            wsl=wsl, sudo=sudo,
+            ssh=ssh,
+            container=container,
+            pg_user=pg_user,
+            pg_database=pg_database,
+            wsl=wsl,
+            sudo=sudo,
         )
     if kind in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
         if not ssh:
             raise ValueError("DuckDbSshTransport requires `ssh` (host target).")
         return DuckDbSshTransport(
-            ssh=ssh, helper_path=helper_path, wsl=wsl, threads=threads,
+            ssh=ssh,
+            helper_path=helper_path,
+            wsl=wsl,
+            threads=threads,
             python=python,
         )
     if kind in ("ssh+clickhouse", "ssh_clickhouse", "clickhouse+ssh"):
@@ -427,8 +478,11 @@ def build_transport(
                 "`container` (docker container name)."
             )
         return ClickHouseSshTransport(
-            ssh=ssh, container=container, ch_database=ch_database,
-            wsl=wsl, sudo=sudo,
+            ssh=ssh,
+            container=container,
+            ch_database=ch_database,
+            wsl=wsl,
+            sudo=sudo,
         )
     raise ValueError(f"Unknown transport: {kind!r}")
 
@@ -436,12 +490,12 @@ def build_transport(
 def _build_db_url(db_config: Mapping[str, Any]) -> str:
     """Build a SQLAlchemy URL. Lives here so transport doesn't import
     api (api imports transport). The api re-exports this for the CLI."""
-    dialect = db_config['dialect']
-    user = db_config['user']
-    password = db_config['password']
-    host = db_config['host']
-    port = db_config['port']
-    if 'oracle' in dialect:
+    dialect = db_config["dialect"]
+    user = db_config["user"]
+    password = db_config["password"]
+    host = db_config["host"]
+    port = db_config["port"]
+    if "oracle" in dialect:
         return f"{dialect}://{user}:{password}@{host}:{port}/{db_config['service']}"
     return f"{dialect}://{user}:{password}@{host}:{port}/{db_config['database']}"
 

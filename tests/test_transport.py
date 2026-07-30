@@ -1,32 +1,48 @@
 """Tests for the transport layer — dispatch, ssh+wsl command shape, CSV parsing."""
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.transport import (
-    DirectTransport, SshWslTransport, build_transport, _parse_psql_csv,
+    DirectTransport,
+    SshWslTransport,
+    build_transport,
+    _parse_psql_csv,
 )
 
 
 class TestBuildTransport:
     def test_default_is_direct(self):
-        t = build_transport(db_config={
-            'dialect': 'postgresql+psycopg2', 'user': 'u', 'password': 'p',
-            'host': 'h', 'port': '5432', 'database': 'db',
-        })
+        t = build_transport(
+            db_config={
+                "dialect": "postgresql+psycopg2",
+                "user": "u",
+                "password": "p",
+                "host": "h",
+                "port": "5432",
+                "database": "db",
+            }
+        )
         assert isinstance(t, DirectTransport)
         assert t.name == "direct"
 
     def test_explicit_direct(self):
-        t = build_transport(db_config={'dialect': 'sqlite', 'user': 'u',
-                                         'password': 'p', 'host': 'h',
-                                         'port': '5', 'database': 'd'},
-                             transport="direct")
+        t = build_transport(
+            db_config={
+                "dialect": "sqlite",
+                "user": "u",
+                "password": "p",
+                "host": "h",
+                "port": "5",
+                "database": "d",
+            },
+            transport="direct",
+        )
         assert isinstance(t, DirectTransport)
 
     def test_ssh_wsl(self):
-        t = build_transport(transport="ssh+wsl",
-                             ssh="adm@host", container="pgduckdb")
+        t = build_transport(transport="ssh+wsl", ssh="adm@host", container="pgduckdb")
         assert isinstance(t, SshWslTransport)
         assert t.name == "ssh+wsl"
         assert t.ssh == "adm@host"
@@ -110,7 +126,9 @@ class TestSshWslExecute:
     @patch("src.transport.subprocess.run")
     def test_failure_raises(self, mock_run):
         mock_run.return_value = MagicMock(
-            returncode=1, stdout=b"", stderr=b"FATAL: connection refused",
+            returncode=1,
+            stdout=b"",
+            stderr=b"FATAL: connection refused",
         )
         t = SshWslTransport(ssh="x", container="y")
         with pytest.raises(RuntimeError, match="connection refused"):

@@ -38,7 +38,7 @@ def _run_query_cli(sql, db_config=None, target=None, output_file=None, limit=Non
         sys.exit(1)
 
     if output_file:
-        with open(output_file, 'w', newline='', encoding='utf-8') as fh:
+        with open(output_file, "w", newline="", encoding="utf-8") as fh:
             result.to_csv(fh)
         print(f"Wrote {result.row_count} rows to {output_file}", file=sys.stderr)
     else:
@@ -66,11 +66,7 @@ def _spawn_background(args_list):
     log_file = JOBS_DIR / f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     with open(log_file, "w") as lf:
         proc = subprocess.Popen(
-            cmd,
-            stdout=lf,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            **kwargs
+            cmd, stdout=lf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kwargs
         )
 
     # Write job metadata
@@ -78,7 +74,12 @@ def _spawn_background(args_list):
     job_data = {
         "pid": proc.pid,
         "started": datetime.now().isoformat(),
-        "manifest": next((a for i, a in enumerate(args_list) if args_list[i-1] == "--manifest"), "queue/manifest.yaml") if "--manifest" in args_list else "queue/manifest.yaml",
+        "manifest": next(
+            (a for i, a in enumerate(args_list) if args_list[i - 1] == "--manifest"),
+            "queue/manifest.yaml",
+        )
+        if "--manifest" in args_list
+        else "queue/manifest.yaml",
         "log_file": str(log_file),
         "args": args_list,
     }
@@ -161,8 +162,7 @@ def _is_pid_alive(pid):
     if sys.platform == "win32":
         try:
             result = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}"],
-                capture_output=True, text=True
+                ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True
             )
             return str(pid) in result.stdout
         except Exception:
@@ -191,75 +191,77 @@ def main():
         "--manifest",
         type=str,
         default="queue/manifest.yaml",
-        help="Path to the manifest YAML file (default: queue/manifest.yaml)"
+        help="Path to the manifest YAML file (default: queue/manifest.yaml)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the execution plan without running any tasks."
+        help="Print the execution plan without running any tasks.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Skip the user confirmation prompt and execute immediately."
+        help="Skip the user confirmation prompt and execute immediately.",
     )
     parser.add_argument(
         "--enable-all",
         "--run-all",
         action="store_true",
-        help="Run all tasks in the manifest, ignoring the 'enabled: false' flag."
+        help="Run all tasks in the manifest, ignoring the 'enabled: false' flag.",
     )
     parser.add_argument(
-        "--bg", "--background",
+        "--bg",
+        "--background",
         action="store_true",
-        help="Spawn the orchestrator as a detached background process."
+        help="Spawn the orchestrator as a detached background process.",
     )
     parser.add_argument(
-        "--status",
-        action="store_true",
-        help="Show status of background jobs."
+        "--status", action="store_true", help="Show status of background jobs."
     )
     parser.add_argument(
-        "--kill",
-        action="store_true",
-        help="Kill the latest running background job."
+        "--kill", action="store_true", help="Kill the latest running background job."
     )
     parser.add_argument(
         "--serve",
         action="store_true",
         help="Run as a long-lived batch server: read line-delimited JSON "
-             "fetch requests from stdin, run each on a persistent per-target "
-             "connection, write the CSV + a JSON status line per request. "
-             "Connection REUSE — one process serves a whole report run."
+        "fetch requests from stdin, run each on a persistent per-target "
+        "connection, write the CSV + a JSON status line per request. "
+        "Connection REUSE — one process serves a whole report run.",
     )
 
     # Query mode (DQL only — no manifests needed)
     parser.add_argument(
-        "--query", "-q",
+        "--query",
+        "-q",
         type=str,
-        help="Execute a SELECT query directly (DQL only, no CREATE/DROP/INSERT)."
+        help="Execute a SELECT query directly (DQL only, no CREATE/DROP/INSERT).",
     )
     parser.add_argument(
-        "--sql-file", "-f",
+        "--sql-file",
+        "-f",
         type=str,
-        help="Execute a SELECT query from a .sql file (DQL only)."
+        help="Execute a SELECT query from a .sql file (DQL only).",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=str,
-        help="Output file for query results (CSV). Default: stdout."
+        help="Output file for query results (CSV). Default: stdout.",
     )
     parser.add_argument(
-        "--limit", "-l",
+        "--limit",
+        "-l",
         type=int,
-        help="Limit number of rows returned (wraps query in ROWNUM)."
+        help="Limit number of rows returned (wraps query in ROWNUM).",
     )
     parser.add_argument(
-        "--target", "-t",
+        "--target",
+        "-t",
         type=str,
         help="Named DB target (DB_TARGET_<NAME>_* in .env), e.g. MR3 or "
-             "ORACLE. Query mode only; supplies transport + secrets so no "
-             "default DB_* connection is needed."
+        "ORACLE. Query mode only; supplies transport + secrets so no "
+        "default DB_* connection is needed.",
     )
 
     args = parser.parse_args()
@@ -279,6 +281,7 @@ def main():
     # secrets, no default DB_* connection needed).
     if args.serve:
         from src.server import serve
+
         sys.exit(serve())
 
     # Handle background spawn
@@ -309,29 +312,31 @@ def main():
             if not sql_path.exists():
                 print(f"ERROR: SQL file not found: {sql_path}", file=sys.stderr)
                 sys.exit(1)
-            sql = sql_path.read_text(encoding='utf-8').strip()
+            sql = sql_path.read_text(encoding="utf-8").strip()
             # Strip trailing semicolons (ORA-00911)
-            if sql.endswith(';'):
+            if sql.endswith(";"):
                 sql = sql[:-1].strip()
 
         if args.target:
-            _run_query_cli(sql, target=args.target,
-                           output_file=args.output, limit=args.limit)
+            _run_query_cli(
+                sql, target=args.target, output_file=args.output, limit=args.limit
+            )
         else:
             try:
-                db_config = load_settings()['db']
+                db_config = load_settings()["db"]
             except Exception as e:
                 log.critical(f"Failed to load configuration: {e}")
                 sys.exit(1)
-            _run_query_cli(sql, db_config=db_config,
-                           output_file=args.output, limit=args.limit)
+            _run_query_cli(
+                sql, db_config=db_config, output_file=args.output, limit=args.limit
+            )
         return
 
     # 4. Load configuration for manifest mode.
     try:
         settings = load_settings()
-        db_config = settings['db']
-        notifier_config = settings['notifier']
+        db_config = settings["db"]
+        notifier_config = settings["notifier"]
     except Exception as e:
         log.critical(f"Failed to load configuration: {e}")
         sys.exit(1)
@@ -355,6 +360,7 @@ def main():
     except Exception as e:
         log.critical(f"An unexpected error occurred: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

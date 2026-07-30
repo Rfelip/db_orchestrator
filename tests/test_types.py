@@ -1,4 +1,5 @@
 """Tests for the typed step contract — validation behaviour at parse time."""
+
 import pytest
 
 from src.types import Step, ManifestConfig
@@ -13,24 +14,26 @@ class TestStepFromDict:
         assert s.params == {}
 
     def test_full_step_parses(self):
-        s = Step.from_dict({
-            "name": "load_data",
-            "type": "psql",
-            "file": "scripts/load.sql",
-            "params": {"region": "BR"},
-            "transaction_group": "tg1",
-            "joined_group": "jg1",
-            "joined_glue": "raw",
-            "cleanup_target": "staging.x",
-            "cleanup_mode": "truncate",
-            "profile": True,
-            "notify": True,
-            "ping_on_end": "U1",
-            "ping_on_error": "U2",
-            "description": "Load staging data",
-            "output_file": "out.csv",
-            "enabled": False,
-        })
+        s = Step.from_dict(
+            {
+                "name": "load_data",
+                "type": "psql",
+                "file": "scripts/load.sql",
+                "params": {"region": "BR"},
+                "transaction_group": "tg1",
+                "joined_group": "jg1",
+                "joined_glue": "raw",
+                "cleanup_target": "staging.x",
+                "cleanup_mode": "truncate",
+                "profile": True,
+                "notify": True,
+                "ping_on_end": "U1",
+                "ping_on_error": "U2",
+                "description": "Load staging data",
+                "output_file": "out.csv",
+                "enabled": False,
+            }
+        )
         assert s.name == "load_data"
         assert s.params == {"region": "BR"}
         assert s.cleanup_mode == "truncate"
@@ -58,15 +61,23 @@ class TestStepFromDict:
 
     def test_invalid_joined_glue_raises(self):
         with pytest.raises(ValueError, match="joined_glue"):
-            Step.from_dict({
-                "name": "x", "type": "psql", "joined_glue": "weird",
-            })
+            Step.from_dict(
+                {
+                    "name": "x",
+                    "type": "psql",
+                    "joined_glue": "weird",
+                }
+            )
 
     def test_invalid_cleanup_mode_raises(self):
         with pytest.raises(ValueError, match="cleanup_mode"):
-            Step.from_dict({
-                "name": "x", "type": "sql", "cleanup_mode": "explode",
-            })
+            Step.from_dict(
+                {
+                    "name": "x",
+                    "type": "sql",
+                    "cleanup_mode": "explode",
+                }
+            )
 
     def test_step_is_frozen(self):
         s = Step.from_dict({"name": "x", "type": "sql"})
@@ -85,12 +96,14 @@ class TestManifestConfigFromDict:
 
     def test_validates_each_step(self):
         with pytest.raises(ValueError, match="unknown keys"):
-            ManifestConfig.from_dict({
-                "steps": [
-                    {"name": "good", "type": "sql"},
-                    {"name": "bad",  "type": "sql", "unknown": True},
-                ],
-            })
+            ManifestConfig.from_dict(
+                {
+                    "steps": [
+                        {"name": "good", "type": "sql"},
+                        {"name": "bad", "type": "sql", "unknown": True},
+                    ],
+                }
+            )
 
     def test_steps_must_be_list(self):
         with pytest.raises(ValueError, match="'steps' must be a list"):

@@ -9,6 +9,7 @@ fields keep their `None` default so existing manifests stay valid.
 fields via attribute access (`step.name`, `step.transaction_group`)
 rather than `.get()`-style dict access.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -31,14 +32,27 @@ _VALID_TYPES = frozenset({"sql", "plsql", "psql", "bulk_insert", "python", "mani
 
 # Recognised keys on a step. Anything outside this set is a typo and
 # raises at parse time.
-_RECOGNISED_KEYS = frozenset({
-    "name", "type", "enabled", "description",
-    "file", "sql_id", "params",
-    "transaction_group", "joined_group", "joined_glue",
-    "cleanup_target", "cleanup_mode",
-    "profile", "output_file",
-    "notify", "ping_on_end", "ping_on_error",
-})
+_RECOGNISED_KEYS = frozenset(
+    {
+        "name",
+        "type",
+        "enabled",
+        "description",
+        "file",
+        "sql_id",
+        "params",
+        "transaction_group",
+        "joined_group",
+        "joined_glue",
+        "cleanup_target",
+        "cleanup_mode",
+        "profile",
+        "output_file",
+        "notify",
+        "ping_on_end",
+        "ping_on_error",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +123,7 @@ class Step:
             )
         if raw.get("file") and raw.get("sql_id"):
             raise ValueError(
-                f"step '{raw['name']}': set either 'file' or 'sql_id', "
-                f"not both."
+                f"step '{raw['name']}': set either 'file' or 'sql_id', not both."
             )
         joined_glue = raw.get("joined_glue")
         if joined_glue is not None and joined_glue not in ("statement", "raw"):
@@ -132,8 +145,12 @@ class Step:
             file=raw.get("file"),
             sql_id=raw.get("sql_id"),
             params=dict(raw.get("params") or {}),
-            transaction_group=GroupId(raw["transaction_group"]) if raw.get("transaction_group") else None,
-            joined_group=GroupId(raw["joined_group"]) if raw.get("joined_group") else None,
+            transaction_group=GroupId(raw["transaction_group"])
+            if raw.get("transaction_group")
+            else None,
+            joined_group=GroupId(raw["joined_group"])
+            if raw.get("joined_group")
+            else None,
             joined_glue=joined_glue,
             cleanup_target=raw.get("cleanup_target"),
             cleanup_mode=cleanup_mode,
@@ -159,9 +176,7 @@ class ManifestConfig:
         code never has to know whether the path came from a catalog or
         from inline manifest text."""
         if not isinstance(raw, Mapping):
-            raise ValueError(
-                f"manifest must be a mapping, got {type(raw).__name__}"
-            )
+            raise ValueError(f"manifest must be a mapping, got {type(raw).__name__}")
         raw_steps = raw.get("steps") or []
         if not isinstance(raw_steps, list):
             raise ValueError("manifest 'steps' must be a list")
@@ -178,4 +193,5 @@ def _resolve_sql_id(step: "Step", catalog) -> "Step":
         return step
     entry = catalog.resolve(step.sql_id)
     from dataclasses import replace
+
     return replace(step, file=entry.file, sql_id=None)
