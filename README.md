@@ -48,7 +48,7 @@ result = run_sql(
 print(result.columns, result.rows, result.elapsed_ms)
 ```
 
-Two transports ship today:
+Transports that ship today:
 
   - **direct** — SQLAlchemy connection to a host:port. Use for local
     Postgres, Oracle, or any DB whose port the caller can reach.
@@ -56,6 +56,10 @@ Two transports ship today:
     --csv -f -` with SQL on stdin. Use for containerised DBs reachable
     only via SSH (e.g. MR3's pgduckdb, where Tailscale terminates at
     the Windows host and the container's port is not visible).
+  - **ssh+duckdb** — native DuckDB on the remote host, the full dialect
+    (`read_parquet`, `glob`, `filename=true`) that pgduckdb does not
+    expose. See *Native DuckDB* below.
+  - **ssh+clickhouse** — `clickhouse-client` in a container over ssh.
 
 The transport is set by `DB_TARGET_<NAME>_TRANSPORT` in `.env`. The
 caller never has to know which one fires.
@@ -82,6 +86,123 @@ run_manifest(
 
 `run_sql` / `run_manifest` are the canonical entry points. `main.py`
 is a thin CLI wrapper around them.
+
+## Native DuckDB
+
+A `ssh+duckdb` target runs the manifest on **one persistent remote
+DuckDB** — a single process for the whole run, so a `TEMP TABLE` created
+in one step is there for the next. That is a semantic requirement, not a
+speed optimisation: a pipeline that stages per-bucket temp tables cannot
+work on a connection-per-statement transport.
+
+```bash
+python main.py --manifest manifests/pipeline.yaml --target MR3DUCK --force
+```
+
+```ini
+DB_TARGET_MR3DUCK_TRANSPORT=ssh+duckdb
+DB_TARGET_MR3DUCK_SSH=mr3-lan
+DB_TARGET_MR3DUCK_WSL=false
+DB_TARGET_MR3DUCK_PYTHON=/home/user/.venv/bin/python
+
+# Run knobs. Defaults shown; they belong to the machine, not the SQL.
+DB_TARGET_MR3DUCK_MEMORY_LIMIT=16GB
+DB_TARGET_MR3DUCK_THREADS=8
+DB_TARGET_MR3DUCK_TEMP_DIRECTORY=~/duckdb_spill
+DB_TARGET_MR3DUCK_MAX_TEMP_DIRECTORY_SIZE=512GB
+DB_TARGET_MR3DUCK_PRESERVE_INSERTION_ORDER=false
+DB_TARGET_MR3DUCK_PROFILE=false
+```
+
+`temp_directory` must sit on fast storage — `~` on MR3 is NVMe;
+`/mnt/BANCOS` is a rotational RAID1 and spill is write-heavy.
+`max_temp_directory_size` is validated as a bounded size because the
+host is shared and an unbounded spill fills the root filesystem.
+
+As a library:
+
+```python
+from src.duckdb_session import open_ssh_session
+from src.transport import DuckDbSettings, build_transport
+
+transport = build_transport(transport="ssh+duckdb", ssh="mr3-lan", wsl=False,
+                            settings=DuckDbSettings(memory_limit="16GB"))
+with open_ssh_session(transport) as session:
+    session.run("CREATE TEMP TABLE t AS SELECT 1")
+    result = session.run("SELECT * FROM t")
+```
+
+`session.run()` returns either a `RawResult` (there was a result set) or
+a `Completed` (there was not — DDL, DML, `COPY`, `SET`). It does not
+report a `COPY` as an empty SELECT.
+
+`psql` and `plsql` steps are refused on a DuckDB target rather than
+approximated.
+
+## Declared fan-out: `foreach`
+
+A step repeats by declaring the axes it ranges over. Several axes are
+their cross product, in declaration order, last axis varying fastest.
+
+```yaml
+steps:
+  - name: at_ingressos
+    type: sql
+    file: "02 - Eventos/02 - at_ingressos.sql"
+    params: { out: /mnt/lake }
+    foreach:
+      bkt: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+  - name: qx
+    type: sql
+    file: "05 - Tabuas/03 - qx.sql"
+    foreach:
+      bkt: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+      year: [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+```
+
+The first becomes 16 steps named `at_ingressos_bkt00 … _bkt15`; the
+second becomes 144, `qx_bkt00_year2017 … qx_bkt15_year2025`. Integer
+values are zero-padded to the widest value on their axis, so names sort
+the way the values do. Each expansion gets its axis values merged into
+`params`, so the SQL uses `{{ bkt }}` / `{{ year }}` unchanged.
+
+An axis that is also set in `params` is an error, not an override. The
+unknown-key check is unchanged: `foreach` widens the schema by exactly
+one key.
+
+**Limitation:** expanded step names exist nowhere in the source YAML, so
+`disable_step` cannot match them. A `foreach` manifest is never
+rewritten (good — it is hand-written source) but it is also not
+resumable through the `enabled: false` mechanism. The loader logs a
+warning when it expands anything.
+
+## Execution plans
+
+With `PROFILE=true` on a DuckDB target, every statement's plan is
+captured — via `SET enable_profiling='json'` rather than
+`EXPLAIN ANALYZE`, because that captures DDL and `COPY` too and needs no
+query rewriting.
+
+```
+reports/plans/<run_id>/index.jsonl        one line per statement
+reports/plans/<run_id>/001_<step>.json    the raw DuckDB profile
+```
+
+```bash
+python main.py --plans          # summarise the latest run
+python main.py --plans list     # list captured run ids
+python main.py --plans 20260730T101500
+```
+
+The summary reports the slowest steps with their top operators, and the
+dominant operators across the whole run. `--plan-dir` (or
+`$ORCH_PLAN_DIR`) moves the store.
+
+Measured cost of leaving profiling on: **~0.2 ms per statement**, fixed.
+On four statements over 4M rows that is +1.7%; on 345 sub-millisecond
+statements it is +61%. Against anything doing real work it disappears —
+a 345-step pipeline pays about 0.07s.
 
 ## SQL catalog (optional)
 
@@ -176,6 +297,10 @@ db_orchestrator/
 ├── src/
 │   ├── database.py          # SQLAlchemy connection & transaction management
 │   ├── executor.py          # Main orchestration logic
+│   ├── transport.py         # How SQL reaches a DB + DuckDbSettings
+│   ├── duckdb_session.py    # Persistent remote DuckDB session
+│   ├── plans.py             # Plan capture, storage, and summary
+│   ├── types.py             # Step / ManifestConfig, foreach expansion
 │   ├── parser.py            # SQL file reading
 │   ├── notifier.py          # Discord webhook notifications
 │   ├── reporter.py          # Execution report generation
@@ -217,7 +342,7 @@ steps:
     enabled: true
 ```
 
-**Step types:** `sql`, `plsql`, `python`. Python scripts break any open transaction and run standalone via subprocess.
+**Step types:** `sql`, `plsql`, `psql`, `bulk_insert`, `python`, `manifest`. Python scripts break any open transaction and run standalone via subprocess.
 
 ## Key Behaviors
 
