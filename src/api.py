@@ -323,13 +323,20 @@ def run_sql(
 def run_manifest(
     manifest_path: Path | str,
     *,
-    db_config: Mapping[str, Any],
+    db_config: Mapping[str, Any] | None = None,
     notifier_config: Mapping[str, Any] | None = None,
     dry_run: bool = False,
     force: bool = False,
     enable_all: bool = False,
+    target: str | None = None,
+    plan_dir: Path | str | None = None,
 ) -> None:
     """Load and execute a YAML manifest end-to-end.
+
+    Pass `db_config` for the Oracle / Postgres path, or `target` to name
+    a `DB_TARGET_<NAME>_*` entry. A target whose transport is
+    `ssh+duckdb` runs the whole manifest on ONE persistent remote DuckDB,
+    which is the only mode in which steps share TEMP TABLEs.
 
     Side effects:
         - Writes per-step plans + rendered SQL + summary.json + report.html
@@ -339,6 +346,15 @@ def run_manifest(
         - Sends notifications to whatever channels are configured in
           `notifier_config`.
     """
+    if target is None and db_config is None:
+        raise ValueError("run_manifest needs either `db_config` or `target`.")
+    duckdb_transport, plans = None, None
+    if target is not None:
+        duckdb_transport, db_config = _manifest_target(target)
+        if duckdb_transport is not None and duckdb_transport.settings.profile:
+            from src.plans import PlanStore
+
+            plans = PlanStore(plan_dir or "reports/plans")
     executor = Executor(
         manifest_path=manifest_path,
         db_config=db_config,
@@ -346,8 +362,31 @@ def run_manifest(
         dry_run=dry_run,
         force=force,
         enable_all=enable_all,
+        duckdb_transport=duckdb_transport,
+        plan_store=plans,
     )
     executor.run()
+
+
+def _manifest_target(name: str) -> tuple[Any, Mapping[str, Any]]:
+    """Resolve a named target into (duckdb transport | None, db_config).
+
+    Only `ssh+duckdb` gets a transport; every other target still runs
+    through the SQLAlchemy path with its own connection details, so
+    Oracle and Postgres manifests are unaffected."""
+    cfg = _resolve_target(name)
+    kind = cfg.get("transport", "direct")
+    if kind not in ("ssh+duckdb", "ssh_duckdb", "duckdb+ssh"):
+        return None, cfg
+    transport = build_transport(
+        transport=kind,
+        ssh=cfg["ssh"],
+        wsl=_coerce_bool(cfg.get("wsl", True)),
+        helper_path=cfg.get("helper_path", "/tmp/_orch_duckdb.py"),
+        settings=DuckDbSettings.from_mapping(cfg),
+        python=cfg.get("python", "python3"),
+    )
+    return transport, cfg
 
 
 __all__ = [

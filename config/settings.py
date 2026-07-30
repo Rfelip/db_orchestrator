@@ -189,18 +189,25 @@ def load_settings():
         log.error("PostgreSQL dialect chosen but DB_DATABASE is not set.")
         raise ValueError("DB_DATABASE is required for PostgreSQL dialect.")
 
-    notifier_config = {
+    return {"db": db_config, "notifier": load_notifier_config()}
+
+
+def load_notifier_config():
+    """Notification settings alone, with no DB_* requirement.
+
+    Manifest mode with `--target` needs these without the flat DB_*
+    block `load_settings` insists on. Fan-out is decided in
+    `src/notifier.py:build_notifier` — this struct just carries whatever
+    env supplied. Channels with empty config are skipped silently; the
+    orchestrator never crashes for missing notification credentials.
+    """
+    load_dotenv(find_dotenv(usecwd=True), override=True)
+    return {
         "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL"),
         "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
         "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID"),
         "user_name": os.getenv("USER_NAME", "Unknown"),
     }
-    # Notifier fan-out is decided in src/notifier.py:build_notifier — this
-    # struct just carries whatever env supplied. Channels with empty config
-    # are skipped silently; the orchestrator never crashes for missing
-    # notification credentials.
-
-    return {"db": db_config, "notifier": notifier_config}
 
 
 # Example usage (for testing/debugging, not normally called directly in production)

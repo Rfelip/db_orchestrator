@@ -1,11 +1,8 @@
 import hashlib
-import os
 import re
 import sys
 import time
-import tempfile
 import logging
-import argparse
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -17,11 +14,10 @@ from src.notifier import build_notifier
 from src.utils import render_template
 from src.reporter import Reporter
 from src.profiler import OracleMonitorProfiler, PostgresExplainProfiler
-from config.settings import load_settings  # Assuming we implement this or load env here
 
 # DDL detection — these statements can't be wrapped in EXPLAIN ANALYZE.
 _DDL_PATTERN = re.compile(
-    r'^\s*(?:--[^\n]*\n\s*)*(?:CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|COPY|VACUUM|ANALYZE|COMMENT|REFRESH)\b',
+    r"^\s*(?:--[^\n]*\n\s*)*(?:CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|COPY|VACUUM|ANALYZE|COMMENT|REFRESH)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -30,31 +26,61 @@ def _is_ddl(sql: str) -> bool:
     """Detect whether SQL starts with a DDL/utility statement that can't be EXPLAINed."""
     return bool(_DDL_PATTERN.match(sql))
 
+
+def _build_url(db_config):
+    """SQLAlchemy DSN from the flat `.env` connection block."""
+    db_name = db_config.get("database") or db_config.get("service")
+    return (
+        f"{db_config['dialect']}://{db_config['user']}:{db_config['password']}@"
+        f"{db_config['host']}:{db_config['port']}/{db_name}"
+    )
+
+
 # Setup local logger
 log = logging.getLogger(__name__)
+
 
 class Executor:
     """
     The main orchestrator class responsible for executing the workflow defined in the manifest.
     """
 
-    def __init__(self, manifest_path, db_config, notifier_config, dry_run=False, force=False, enable_all=False):
+    def __init__(
+        self,
+        manifest_path,
+        db_config,
+        notifier_config,
+        dry_run=False,
+        force=False,
+        enable_all=False,
+        duckdb_transport=None,
+        plan_store=None,
+    ):
         """
         Initialize the Executor.
 
         Args:
             manifest_path (str): Path to manifest.yaml.
-            db_config (dict): Database connection details.
+            db_config (dict): Database connection details. Ignored (and may
+                be empty) when `duckdb_transport` is supplied.
             notifier_config (dict): Notification settings.
             dry_run (bool): If True, only print the plan and exit.
             force (bool): If True, skip user confirmation.
             enable_all (bool): If True, run all tasks regardless of 'enabled' flag.
+            duckdb_transport (DuckDbSshTransport | None): When set, the whole
+                manifest runs on ONE persistent remote DuckDB instead of a
+                SQLAlchemy engine. This is the only mode in which steps can
+                share TEMP TABLEs.
+            plan_store (PlanStore | None): Where per-statement DuckDB plans
+                are captured. Only meaningful with `duckdb_transport`.
         """
         self.manifest_path = manifest_path
         self.db_config = db_config
         self.dry_run = dry_run
         self.force = force
         self.enable_all = enable_all
+        self.duckdb_transport = duckdb_transport
+        self.plan_store = plan_store
 
         self.yaml_manager = YamlManager(manifest_path)
         self.notifier = build_notifier(notifier_config)
@@ -69,11 +95,8 @@ class Executor:
         # Format: dialect://user:pass@host:port/service
         # Note: This is a basic construction.
         # Use 'database' for PG, 'service' for Oracle
-        db_name = db_config.get('database') or db_config.get('service')
-        self.db_url = (
-            f"{db_config['dialect']}://{db_config['user']}:{db_config['password']}@"
-            f"{db_config['host']}:{db_config['port']}/{db_name}"
-        )
+        # A DuckDB run has no DSN at all, so there is nothing to build.
+        self.db_url = None if duckdb_transport else _build_url(db_config)
 
     def run(self):
         """
@@ -100,7 +123,9 @@ class Executor:
 
         except Exception as e:
             log.critical(f"Failed to load manifest: {e}")
-            self.notifier.send_alert("Orchestrator Failure", f"Failed to load manifest: {e}")
+            self.notifier.send_alert(
+                "Orchestrator Failure", f"Failed to load manifest: {e}"
+            )
             sys.exit(1)
 
         # 2. Build grouped plan. Two collapsing concepts:
@@ -119,30 +144,36 @@ class Executor:
 
             if jg is not None:
                 joined_steps = []
-                while i < len(execution_queue) and execution_queue[i].joined_group == jg:
+                while (
+                    i < len(execution_queue) and execution_queue[i].joined_group == jg
+                ):
                     joined_steps.append(execution_queue[i])
                     i += 1
-                plan_items.append(('joined', jg, joined_steps))
+                plan_items.append(("joined", jg, joined_steps))
             elif tg is not None:
                 group_steps = []
-                while (i < len(execution_queue)
-                       and execution_queue[i].transaction_group == tg
-                       and execution_queue[i].joined_group is None):
+                while (
+                    i < len(execution_queue)
+                    and execution_queue[i].transaction_group == tg
+                    and execution_queue[i].joined_group is None
+                ):
                     group_steps.append(execution_queue[i])
                     i += 1
-                plan_items.append(('group', tg, group_steps))
+                plan_items.append(("group", tg, group_steps))
             else:
-                plan_items.append(('step', None, [step]))
+                plan_items.append(("step", None, [step]))
                 i += 1
 
         # 3. Print Plan
         print("\n--- Execution Plan ---")
         for idx, (item_type, group_id, steps) in enumerate(plan_items, 1):
-            if item_type == 'joined':
+            if item_type == "joined":
                 descs = [s.description for s in steps if s.description]
                 desc = f"\n     {descs[0]}" if descs else ""
-                print(f"[{idx}] JOINED '{group_id}' ({len(steps)} psql steps fused){desc}")
-            elif item_type == 'group':
+                print(
+                    f"[{idx}] JOINED '{group_id}' ({len(steps)} psql steps fused){desc}"
+                )
+            elif item_type == "group":
                 descs = [s.description for s in steps if s.description]
                 desc = f"\n     {descs[0]}" if descs else ""
                 print(f"[{idx}] GROUP {group_id} ({len(steps)} steps){desc}")
@@ -150,7 +181,8 @@ class Executor:
                 step = steps[0]
                 s_cleanup = (
                     f" - Cleanup({step.cleanup_mode}): {step.cleanup_target}"
-                    if step.cleanup_target else ""
+                    if step.cleanup_target
+                    else ""
                 )
                 s_desc = f"\n     {step.description}" if step.description else ""
                 print(f"[{idx}] {step.type.upper()}: {step.name}{s_cleanup}{s_desc}")
@@ -169,7 +201,10 @@ class Executor:
             log.info("Force flag detected. Skipping user confirmation.")
 
         # 5. Active Execution Loop
-        self.notifier.send_alert("Job Started", f"Starting execution of {len(plan_items)} tasks ({len(execution_queue)} steps).")
+        self.notifier.send_alert(
+            "Job Started",
+            f"Starting execution of {len(plan_items)} tasks ({len(execution_queue)} steps).",
+        )
 
         job_start_time = time.time()
         executed_steps = []
@@ -177,14 +212,19 @@ class Executor:
         db_manager = None
 
         try:
-            db_manager = DatabaseManager(self.db_url)
-            SQLParser.set_dialect(self.db_config.get('dialect', ''))
-            executed_steps = self._run_steps(
-                execution_queue, db_manager, self.yaml_manager, notify=True
-            )
-
-            # Generate Report
-            self.reporter.generate_report(db_info=self.db_config.get('dialect', 'Unknown'))
+            if self.duckdb_transport is not None:
+                executed_steps = self._run_on_duckdb(execution_queue)
+                self.reporter.generate_report(db_info="DUCKDB")
+            else:
+                db_manager = DatabaseManager(self.db_url)
+                SQLParser.set_dialect(self.db_config.get("dialect", ""))
+                executed_steps = self._run_steps(
+                    execution_queue, db_manager, self.yaml_manager, notify=True
+                )
+                # Generate Report
+                self.reporter.generate_report(
+                    db_info=self.db_config.get("dialect", "Unknown")
+                )
 
             log.info("All tasks completed successfully.")
 
@@ -204,7 +244,7 @@ class Executor:
 
             total_duration = time.time() - job_start_time
             steps_summary = self._format_steps_summary(executed_steps)
-            failed_step = getattr(e, 'failed_step', 'Unknown')
+            failed_step = getattr(e, "failed_step", "Unknown")
 
             summary = (
                 f"Job execution stopped.\n\n"
@@ -215,15 +255,148 @@ class Executor:
 
             # Extract clean error for the summary too
             err_str = str(e)
-            pg_match = re.search(r'\(psycopg2\.errors\.\w+\)\s*(.+?)(?:\n|$)', err_str)
+            pg_match = re.search(r"\(psycopg2\.errors\.\w+\)\s*(.+?)(?:\n|$)", err_str)
             clean_err = pg_match.group(1).strip() if pg_match else err_str[:500]
-            failed_step = getattr(e, 'failed_step', 'unknown')
+            failed_step = getattr(e, "failed_step", "unknown")
             summary += f"\n\n**Failed at:** `{failed_step}`\n**Error:** {clean_err}"
             self.notifier.send_alert("Job Failed", summary)
             sys.exit(1)
         finally:
             if db_manager:
                 db_manager.close()
+
+    # ------- native DuckDB execution ----------------------------------------
+
+    def _run_on_duckdb(self, execution_queue):
+        """Run the whole queue on ONE persistent remote DuckDB.
+
+        Transaction and joined groups are ignored here on purpose: a
+        single session already is the shared context those two labels
+        exist to fake. What the session adds instead is real state — a
+        `TEMP TABLE` from step N is there for step N+1.
+        """
+        from src.duckdb_session import open_ssh_session
+
+        executed_steps = []
+        with open_ssh_session(self.duckdb_transport, plans=self.plan_store) as session:
+            for step in execution_queue:
+                start_time = time.time()
+                try:
+                    self._dispatch_duckdb_step(step, session)
+                except Exception as exc:
+                    self._handle_step_error(step, exc, None, notify=True)
+                    raise
+                self._post_process_step(
+                    step,
+                    time.time() - start_time,
+                    self.yaml_manager,
+                    executed_steps,
+                    notify=True,
+                )
+        return executed_steps
+
+    def _dispatch_duckdb_step(self, step, session):
+        """Route one step onto the DuckDB session.
+
+        `psql` and `plsql` are refused rather than approximated: one
+        needs a docker-hosted Postgres and the other a PL/SQL engine,
+        and silently running either as plain DuckDB SQL would produce a
+        wrong answer instead of an error.
+        """
+        if step.type in ("psql", "plsql"):
+            raise RuntimeError(
+                f"step '{step.name}': type '{step.type}' cannot run on a "
+                f"native DuckDB target. Use type 'sql'."
+            )
+        if step.type == "python":
+            self._execute_python_step(step)
+            return
+        if step.type == "manifest":
+            self._run_child_manifest_on_duckdb(step, session)
+            return
+        self._cleanup_on_duckdb(step, session)
+        self._execute_duckdb_sql_step(step, session)
+
+    def _cleanup_on_duckdb(self, step, session):
+        if not step.cleanup_target:
+            return
+        if step.cleanup_mode == "truncate":
+            session.run(
+                f"DELETE FROM {step.cleanup_target}", step=f"{step.name}:cleanup"
+            )
+        else:
+            session.run(
+                f"DROP TABLE IF EXISTS {step.cleanup_target}",
+                step=f"{step.name}:cleanup",
+            )
+
+    def _execute_duckdb_sql_step(self, step, session):
+        """Render the step's SQL and run it on the session.
+
+        `bulk_insert` files carry several statements; DuckDB's client
+        runs only the first, so they are split the same way the
+        SQLAlchemy path splits them."""
+        from src.duckdb_session import Completed
+
+        file_path = Path(step.file)
+        if not file_path.exists():
+            raise FileNotFoundError(f"SQL file not found: {file_path}")
+        rendered = render_template(SQLParser.read_sql_file(file_path), step.params)
+
+        statements = (
+            [s.strip() for s in rendered.split(";") if s.strip()]
+            if step.type == "bulk_insert"
+            else [rendered]
+        )
+        result = None
+        start = time.time()
+        for statement in statements:
+            result = session.run(statement, step=step.name)
+        duration = time.time() - start
+
+        if step.output_file and not isinstance(result, Completed):
+            self._write_duckdb_output(step, result)
+
+        self.reporter.add_task_result(
+            task_name=step.name,
+            db_type="DUCKDB",
+            metrics={"duration_ms": duration * 1000.0, "parallel_degree": 0},
+            plan_content=self._plan_note(step),
+            rendered_sql=rendered,
+        )
+
+    def _plan_note(self, step):
+        """Where the step's captured plan landed, so the report points at
+        it instead of duplicating it."""
+        if self.plan_store is None:
+            return "(plan capture disabled)"
+        return (
+            f"plan captured under {self.plan_store.dir} (run {self.plan_store.run_id})"
+        )
+
+    def _write_duckdb_output(self, step, result):
+        out_path = Path(step.output_file)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(",".join(result.columns) + "\n")
+            for row in result.rows:
+                fh.write(",".join(map(str, row)) + "\n")
+        log.info(f"Output written to {out_path}")
+
+    def _run_child_manifest_on_duckdb(self, step, session):
+        file_path = Path(step.file)
+        if not file_path.exists():
+            raise FileNotFoundError(f"Child manifest not found: {file_path}")
+        child_steps = YamlManager(file_path).load_manifest().steps
+        queue = (
+            child_steps if self.enable_all else [s for s in child_steps if s.enabled]
+        )
+        log.info(
+            f"Executing child manifest on DuckDB session: {file_path} "
+            f"({len(queue)}/{len(child_steps)} steps enabled)"
+        )
+        for child in queue:
+            self._dispatch_duckdb_step(child, session)
 
     def _run_steps(self, execution_queue, db_manager, yaml_manager, notify=True):
         """
@@ -243,16 +416,21 @@ class Executor:
         current_group = None
 
         for item_type, payload in self._coalesce_into_items(execution_queue):
-            if item_type == 'joined':
+            if item_type == "joined":
                 current_session, current_group = self._close_session(
-                    current_session, current_group, commit=True,
+                    current_session,
+                    current_group,
+                    commit=True,
                 )
                 self._execute_joined_item(payload, yaml_manager, executed_steps, notify)
                 continue
 
             step = payload[0]
             current_session, current_group = self._ensure_session(
-                step, db_manager, current_session, current_group,
+                step,
+                db_manager,
+                current_session,
+                current_group,
             )
 
             try:
@@ -262,11 +440,18 @@ class Executor:
                 # (psql / python / manifest) commit + close it first so the
                 # subprocess sees consistent state.
                 current_session, current_group = self._dispatch_step(
-                    step, db_manager, current_session, current_group,
+                    step,
+                    db_manager,
+                    current_session,
+                    current_group,
                 )
                 duration = time.time() - start_time
                 self._post_process_step(
-                    step, duration, yaml_manager, executed_steps, notify,
+                    step,
+                    duration,
+                    yaml_manager,
+                    executed_steps,
+                    notify,
                 )
             except Exception as e:
                 self._handle_step_error(step, e, current_session, notify)
@@ -274,7 +459,9 @@ class Executor:
                 raise
 
         current_session, _ = self._close_session(
-            current_session, current_group, commit=True,
+            current_session,
+            current_group,
+            commit=True,
         )
         return executed_steps
 
@@ -291,7 +478,7 @@ class Executor:
             s = queue[i]
             jg = s.joined_group
             if jg is None:
-                items.append(('single', [s]))
+                items.append(("single", [s]))
                 i += 1
             else:
                 grp = [s]
@@ -299,17 +486,18 @@ class Executor:
                 while j < len(queue) and queue[j].joined_group == jg:
                     grp.append(queue[j])
                     j += 1
-                items.append(('joined', grp))
+                items.append(("joined", grp))
                 i = j
         return items
 
-    def _execute_joined_item(self, payload, yaml_manager,
-                                executed_steps, notify) -> None:
+    def _execute_joined_item(
+        self, payload, yaml_manager, executed_steps, notify
+    ) -> None:
         """Joined-group dispatch: validate uniformity, run the fused psql,
         record results, disable in manifest, fire one alert if total
         wall-time crosses 5s."""
         types = {s.type for s in payload}
-        if types != {'psql'}:
+        if types != {"psql"}:
             raise RuntimeError(
                 f"joined_group '{payload[0].joined_group}' must contain only "
                 f"`type: psql` steps. Got types: {sorted(types)}"
@@ -317,7 +505,7 @@ class Executor:
         try:
             recs = self._execute_joined_psql_group(payload)
         except Exception as e:
-            if not hasattr(e, 'failed_step'):
+            if not hasattr(e, "failed_step"):
                 e.failed_step = f"joined_group:{payload[0].joined_group}"
             raise
 
@@ -325,7 +513,7 @@ class Executor:
         for s in payload:
             yaml_manager.disable_step(s.name)
         if notify:
-            total = sum(r['duration'] for r in recs)
+            total = sum(r["duration"] for r in recs)
             if total > 5:
                 self.notifier.send_alert(
                     "Joined Group Completed",
@@ -340,7 +528,9 @@ class Executor:
         step_group = step.transaction_group
         if step_group != current_group:
             current_session, current_group = self._close_session(
-                current_session, current_group, commit=True,
+                current_session,
+                current_group,
+                commit=True,
             )
             current_session = db_manager.get_session()
             current_group = step_group
@@ -369,7 +559,7 @@ class Executor:
         """Pre-flight cleanup of `step.cleanup_target` if set."""
         if not step.cleanup_target:
             return
-        if step.cleanup_mode == 'truncate':
+        if step.cleanup_mode == "truncate":
             db_manager.truncate_table(step.cleanup_target, session)
         else:
             db_manager.drop_table(step.cleanup_target, session)
@@ -379,38 +569,43 @@ class Executor:
         (session, group) tuple — for step types that operate outside
         the SQLAlchemy session (psql / python / manifest), the session
         is closed and (None, None) returned."""
-        if step.type in ('sql', 'plsql'):
+        if step.type in ("sql", "plsql"):
             self._execute_sql_step(step, db_manager, current_session)
             return current_session, current_group
-        if step.type == 'bulk_insert':
+        if step.type == "bulk_insert":
             self._execute_bulk_insert_step(step, db_manager, current_session)
             return current_session, current_group
         # The next three step types break out of any open session — they
         # invoke external processes (psql, python, child manifest) that
         # don't share state with SQLAlchemy.
         current_session, current_group = self._close_session(
-            current_session, current_group, commit=True,
+            current_session,
+            current_group,
+            commit=True,
         )
-        if step.type == 'psql':
+        if step.type == "psql":
             self._execute_psql_step(step)
-        elif step.type == 'python':
+        elif step.type == "python":
             self._execute_python_step(step)
-        elif step.type == 'manifest':
+        elif step.type == "manifest":
             self._execute_manifest_step(step, db_manager)
         else:
             log.warning(f"Unknown step type: {step.type}")
         return current_session, current_group
 
-    def _post_process_step(self, step, duration, yaml_manager,
-                            executed_steps, notify) -> None:
+    def _post_process_step(
+        self, step, duration, yaml_manager, executed_steps, notify
+    ) -> None:
         """Record the executed step, disable it in the manifest, and
         fire a completion alert when the step opted in or wall-time
         crossed the threshold."""
-        executed_steps.append({
-            "name": step.name,
-            "duration": duration,
-            "group": step.transaction_group,
-        })
+        executed_steps.append(
+            {
+                "name": step.name,
+                "duration": duration,
+                "group": step.transaction_group,
+            }
+        )
         yaml_manager.disable_step(step.name)
         if not notify:
             return
@@ -437,7 +632,7 @@ class Executor:
                 self._format_failure_body(step, exc),
                 ping=step.ping_on_error,
             )
-        if not hasattr(exc, 'failed_step'):
+        if not hasattr(exc, "failed_step"):
             exc.failed_step = step.name
 
     def _format_failure_body(self, step, exc) -> str:
@@ -446,13 +641,13 @@ class Executor:
         the source SQL — the same prefix the report's rendered/ files
         carry, so the recipient can grep back."""
         err_msg = str(exc)
-        pg_match = re.search(r'\(psycopg2\.errors\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
+        pg_match = re.search(r"\(psycopg2\.errors\.\w+\)\s*(.+?)(?:\n|$)", err_msg)
         if pg_match:
             clean_err = pg_match.group(1).strip()
         else:
-            pg_match2 = re.search(r'psycopg2\.\w+\)\s*(.+?)(?:\n|$)', err_msg)
+            pg_match2 = re.search(r"psycopg2\.\w+\)\s*(.+?)(?:\n|$)", err_msg)
             clean_err = pg_match2.group(1).strip() if pg_match2 else err_msg[:300]
-        sql_file = step.file or 'unknown'
+        sql_file = step.file or "unknown"
         group_label = step.transaction_group or step.joined_group
         group_line = f"\n**Group:** `{group_label}`" if group_label else ""
         sql_hash = self._sql_hash_for_step(step)
@@ -493,7 +688,9 @@ class Executor:
         else:
             child_queue = [s for s in child_steps if s.enabled]
 
-        log.info(f"Executing child manifest: {file_path} ({len(child_queue)}/{len(child_steps)} steps enabled)")
+        log.info(
+            f"Executing child manifest: {file_path} ({len(child_queue)}/{len(child_steps)} steps enabled)"
+        )
 
         # Child manifests run with notify=False — the parent step handles notifications.
         self._run_steps(child_queue, db_manager, child_yaml, notify=False)
@@ -511,11 +708,13 @@ class Executor:
         # wrapped in EXPLAIN ANALYZE on Postgres, so for those we skip profiling
         # and let the executor fall back to wall-clock-only timing in the report.
         profiler = None
-        dialect = self.db_config.get('dialect', '').lower()
-        if 'oracle' in dialect:
-            use_diagnostics = self.db_config.get('use_diagnostics_pack', True)
-            profiler = OracleMonitorProfiler(session, use_diagnostics_pack=use_diagnostics)
-        elif 'postgres' in dialect:
+        dialect = self.db_config.get("dialect", "").lower()
+        if "oracle" in dialect:
+            use_diagnostics = self.db_config.get("use_diagnostics_pack", True)
+            profiler = OracleMonitorProfiler(
+                session, use_diagnostics_pack=use_diagnostics
+            )
+        elif "postgres" in dialect:
             if not _is_ddl(final_sql):
                 profiler = PostgresExplainProfiler()
             else:
@@ -537,28 +736,31 @@ class Executor:
                     if rows:
                         out_path = Path(step.output_file)
                         out_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(out_path, 'w', encoding='utf-8') as f:
+                        with open(out_path, "w", encoding="utf-8") as f:
                             if result.keys():
-                                f.write(','.join(result.keys()) + '\n')
+                                f.write(",".join(result.keys()) + "\n")
                             for row in rows:
-                                f.write(','.join(map(str, row)) + '\n')
+                                f.write(",".join(map(str, row)) + "\n")
                         log.info(f"Output written to {out_path}")
 
                 # Profiling Capture
                 if profiler:
                     try:
-                        profiler.post_execution_capture(result.cursor if hasattr(result, 'cursor') else result, result)
+                        profiler.post_execution_capture(
+                            result.cursor if hasattr(result, "cursor") else result,
+                            result,
+                        )
                         metrics = profiler.get_metrics()
 
                         # Backfill duration if missing (e.g. Oracle Fallback)
-                        if metrics.get('duration_ms', 0) == 0:
-                            metrics['duration_ms'] = duration_exec * 1000.0
+                        if metrics.get("duration_ms", 0) == 0:
+                            metrics["duration_ms"] = duration_exec * 1000.0
 
                         plan_content = profiler.get_plan_content()
 
                         self.reporter.add_task_result(
                             task_name=step.name,
-                            db_type=dialect.split('+')[0].upper(),
+                            db_type=dialect.split("+")[0].upper(),
                             metrics=metrics,
                             plan_content=plan_content,
                             rendered_sql=final_sql,
@@ -566,11 +768,13 @@ class Executor:
                     except Exception as pe:
                         log.error(f"Profiling failed for step '{step.name}': {pe}")
 
-                break # Success
+                break  # Success
             except Exception as e:
                 if attempt < retries:
-                    wait = 5 * 2 ** attempt
-                    log.warning(f"Step '{step.name}' failed. Retrying in {wait}s... Error: {e}")
+                    wait = 5 * 2**attempt
+                    log.warning(
+                        f"Step '{step.name}' failed. Retrying in {wait}s... Error: {e}"
+                    )
                     time.sleep(wait)
                 else:
                     log.error(f"Step '{step.name}' failed after {retries} retries.")
@@ -592,14 +796,16 @@ class Executor:
 
         # Simple split — safe here because bulk_insert files are plain
         # DML/DDL with no PL/SQL blocks.
-        statements = [s.strip() for s in final_sql.split(';') if s.strip()]
+        statements = [s.strip() for s in final_sql.split(";") if s.strip()]
 
         log.info(f"bulk_insert: {file_path.name} — {len(statements)} statements")
 
         for idx, stmt in enumerate(statements):
             db_manager.execute_query(stmt, session=session)
 
-        log.info(f"bulk_insert: {file_path.name} — all {len(statements)} statements executed")
+        log.info(
+            f"bulk_insert: {file_path.name} — all {len(statements)} statements executed"
+        )
 
     def _execute_joined_psql_group(self, group):
         """Run consecutive ``psql`` steps that share a ``joined_group`` label as one psql call.
@@ -622,8 +828,8 @@ class Executor:
         if not group:
             return []
         joined_label = group[0].joined_group
-        joined_glue = (group[0].joined_glue or 'statement').lower()
-        if joined_glue not in ('statement', 'raw'):
+        joined_glue = (group[0].joined_glue or "statement").lower()
+        if joined_glue not in ("statement", "raw"):
             raise ValueError(
                 f"joined_glue must be 'statement' or 'raw', got '{joined_glue}'"
             )
@@ -635,27 +841,27 @@ class Executor:
                 raise FileNotFoundError(f"SQL file not found: {file_path}")
             raw = SQLParser.read_sql_file(file_path)
             rendered = render_template(raw, step.params)
-            if joined_glue == 'statement':
+            if joined_glue == "statement":
                 # Each fragment is its own statement; strip trailing `;` so we
                 # can join cleanly and add one big trailing `;` at the end.
-                rendered = rendered.rstrip().rstrip(';')
+                rendered = rendered.rstrip().rstrip(";")
             fragments.append(rendered)
 
-        if joined_glue == 'statement':
+        if joined_glue == "statement":
             full_sql = "\n;\n\n".join(fragments) + "\n;"
         else:  # raw / megazord
             full_sql = "\n".join(fragments)
 
-        container = self.db_config.get('container_name')
+        container = self.db_config.get("container_name")
         if not container:
             raise RuntimeError(
                 "joined_group requires DB_CONTAINER_NAME to be set"
                 " (the docker container name where psql will run)."
             )
-        user = self.db_config.get('user') or 'postgres'
-        db = self.db_config.get('database') or 'postgres'
-        sudo = self.db_config.get('docker_sudo', True)
-        docker_prefix = ['sudo', 'docker'] if sudo else ['docker']
+        user = self.db_config.get("user") or "postgres"
+        db = self.db_config.get("database") or "postgres"
+        sudo = self.db_config.get("docker_sudo", True)
+        docker_prefix = ["sudo", "docker"] if sudo else ["docker"]
 
         names = [s.name for s in group]
         log.info(
@@ -666,24 +872,37 @@ class Executor:
 
         start = time.time()
         exec_cmd = docker_prefix + [
-            'exec', '-i', container,
-            'psql', '-U', user, '-d', db,
-            '-v', 'ON_ERROR_STOP=1', '-q',
-            '-f', '-',
+            "exec",
+            "-i",
+            container,
+            "psql",
+            "-U",
+            user,
+            "-d",
+            db,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-q",
+            "-f",
+            "-",
         ]
         proc = subprocess.run(
             exec_cmd,
-            input=full_sql.encode('utf-8'),
+            input=full_sql.encode("utf-8"),
             capture_output=True,
             check=False,
         )
         duration = time.time() - start
 
         if proc.returncode != 0:
-            stderr_text = (proc.stderr or b'').decode('utf-8', errors='replace')
-            tail = '\n'.join(stderr_text.splitlines()[-60:])
-            log.error(f"joined_group '{joined_label}' failed (rc={proc.returncode}):\n{tail}")
-            err = subprocess.CalledProcessError(proc.returncode, exec_cmd, proc.stdout, proc.stderr)
+            stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
+            tail = "\n".join(stderr_text.splitlines()[-60:])
+            log.error(
+                f"joined_group '{joined_label}' failed (rc={proc.returncode}):\n{tail}"
+            )
+            err = subprocess.CalledProcessError(
+                proc.returncode, exec_cmd, proc.stdout, proc.stderr
+            )
             raise err
 
         log.info(f"joined_group '{joined_label}' ok  ({duration:.2f}s)")
@@ -691,15 +910,17 @@ class Executor:
         per_step = duration / max(len(group), 1)
         records = []
         for step in group:
-            records.append({
-                "name": step.name,
-                "duration": per_step,
-                "group": step.transaction_group,
-            })
+            records.append(
+                {
+                    "name": step.name,
+                    "duration": per_step,
+                    "group": step.transaction_group,
+                }
+            )
             self.reporter.add_task_result(
                 task_name=step.name,
-                db_type='PGDUCKDB',
-                metrics={'duration_ms': per_step * 1000.0, 'parallel_degree': 0},
+                db_type="PGDUCKDB",
+                metrics={"duration_ms": per_step * 1000.0, "parallel_degree": 0},
                 plan_content=f"(part of joined_group '{joined_label}', {len(group)} fragments)",
                 rendered_sql=full_sql,
             )
@@ -726,83 +947,108 @@ class Executor:
         params = step.params
         rendered = render_template(raw_sql, params)
 
-        container = self.db_config.get('container_name')
+        container = self.db_config.get("container_name")
         if not container:
             raise RuntimeError(
                 "psql step requires DB_CONTAINER_NAME to be set in the environment"
                 " (the docker container name where psql will run)."
             )
-        user = self.db_config.get('user') or 'postgres'
-        db = self.db_config.get('database') or 'postgres'
-        sudo = self.db_config.get('docker_sudo', True)
+        user = self.db_config.get("user") or "postgres"
+        db = self.db_config.get("database") or "postgres"
+        sudo = self.db_config.get("docker_sudo", True)
 
         log.info(f"psql: {step.name}  ({file_path.name})")
 
-        docker_prefix = ['sudo', 'docker'] if sudo else ['docker']
+        docker_prefix = ["sudo", "docker"] if sudo else ["docker"]
 
         # Stream SQL via stdin to avoid `docker cp` permission issues — when
         # cp'd, the file inherits the host UID and the container's `postgres`
         # user can't read mode-0600 tempfiles.
         start = time.time()
         exec_cmd = docker_prefix + [
-            'exec', '-i', container,
-            'psql', '-U', user, '-d', db,
-            '-v', 'ON_ERROR_STOP=1', '-q',
-            '-f', '-',  # read SQL from stdin
+            "exec",
+            "-i",
+            container,
+            "psql",
+            "-U",
+            user,
+            "-d",
+            db,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-q",
+            "-f",
+            "-",  # read SQL from stdin
         ]
         proc = subprocess.run(
             exec_cmd,
-            input=rendered.encode('utf-8'),
+            input=rendered.encode("utf-8"),
             capture_output=True,
             check=False,
         )
         duration = time.time() - start
 
         if proc.returncode != 0:
-            stderr_text = (proc.stderr or b'').decode('utf-8', errors='replace')
-            tail = '\n'.join(stderr_text.splitlines()[-40:])
+            stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
+            tail = "\n".join(stderr_text.splitlines()[-40:])
             log.error(f"psql step failed (rc={proc.returncode}):\n{tail}")
-            err = subprocess.CalledProcessError(proc.returncode, exec_cmd, proc.stdout, proc.stderr)
+            err = subprocess.CalledProcessError(
+                proc.returncode, exec_cmd, proc.stdout, proc.stderr
+            )
             raise err
 
         log.info(f"psql ok  ({duration:.2f}s)  stdout:{len(proc.stdout)} bytes")
 
         # Optional profiling.
         if step.profile and not _is_ddl(rendered):
-            self._capture_psql_profile(step, rendered, container, user, db, sudo, duration)
+            self._capture_psql_profile(
+                step, rendered, container, user, db, sudo, duration
+            )
         else:
             self.reporter.add_task_result(
                 task_name=step.name,
-                db_type='PGDUCKDB',
-                metrics={'duration_ms': duration * 1000.0, 'parallel_degree': 0},
-                plan_content='(profiling disabled for this step)',
+                db_type="PGDUCKDB",
+                metrics={"duration_ms": duration * 1000.0, "parallel_degree": 0},
+                plan_content="(profiling disabled for this step)",
                 rendered_sql=rendered,
             )
 
-    def _capture_psql_profile(self, step, rendered_sql, container, user, db, sudo, duration_s):
+    def _capture_psql_profile(
+        self, step, rendered_sql, container, user, db, sudo, duration_s
+    ):
         """Run `EXPLAIN ANALYZE ... FORMAT JSON` for a profileable SELECT step."""
         explain_sql = f"EXPLAIN (ANALYZE, BUFFERS, VERBOSE, SETTINGS, FORMAT JSON) {rendered_sql.rstrip().rstrip(';')}"
-        docker_prefix = ['sudo', 'docker'] if sudo else ['docker']
+        docker_prefix = ["sudo", "docker"] if sudo else ["docker"]
         exec_cmd = docker_prefix + [
-            'exec', '-i', container,
-            'psql', '-U', user, '-d', db,
-            '-At', '-v', 'ON_ERROR_STOP=1',
-            '-f', '-',
+            "exec",
+            "-i",
+            container,
+            "psql",
+            "-U",
+            user,
+            "-d",
+            db,
+            "-At",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-f",
+            "-",
         ]
         proc = subprocess.run(
             exec_cmd,
-            input=explain_sql.encode('utf-8'),
+            input=explain_sql.encode("utf-8"),
             capture_output=True,
             check=False,
         )
         if proc.returncode != 0:
-            stderr_text = (proc.stderr or b'').decode('utf-8', errors='replace')
+            stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
             log.warning(f"EXPLAIN failed for {step.name}: {stderr_text[:300]}")
             return
 
         import json as _json
+
         try:
-            plan_json = _json.loads(proc.stdout.decode('utf-8'))
+            plan_json = _json.loads(proc.stdout.decode("utf-8"))
         except Exception as e:
             log.warning(f"Could not parse EXPLAIN JSON for {step.name}: {e}")
             return
@@ -811,12 +1057,14 @@ class Executor:
         profiler.raw_plan_json = plan_json
         if isinstance(plan_json, list) and plan_json:
             root = plan_json[0]
-            profiler._analyze_plan_node(root.get('Plan', {}))
-            profiler.metrics['duration_ms'] = root.get('Execution Time', duration_s * 1000.0)
+            profiler._analyze_plan_node(root.get("Plan", {}))
+            profiler.metrics["duration_ms"] = root.get(
+                "Execution Time", duration_s * 1000.0
+            )
 
         self.reporter.add_task_result(
             task_name=step.name,
-            db_type='PGDUCKDB',
+            db_type="PGDUCKDB",
             metrics=profiler.get_metrics(),
             plan_content=profiler.get_plan_content(),
             rendered_sql=rendered_sql,
@@ -851,18 +1099,24 @@ class Executor:
         i = 0
         while i < len(executed_steps):
             s = executed_steps[i]
-            group = s.get('group')
+            group = s.get("group")
             task_idx += 1
 
             if group is not None:
                 group_steps = []
-                while i < len(executed_steps) and executed_steps[i].get('group') == group:
+                while (
+                    i < len(executed_steps) and executed_steps[i].get("group") == group
+                ):
                     group_steps.append(executed_steps[i])
                     i += 1
-                total = sum(gs['duration'] for gs in group_steps)
-                lines.append(f"Task {task_idx} - Group {group} ({len(group_steps)} steps) - time taken: {total:.2f}s")
+                total = sum(gs["duration"] for gs in group_steps)
+                lines.append(
+                    f"Task {task_idx} - Group {group} ({len(group_steps)} steps) - time taken: {total:.2f}s"
+                )
             else:
-                lines.append(f"Task {task_idx} - {s['name']} - time taken: {s['duration']:.2f}s")
+                lines.append(
+                    f"Task {task_idx} - {s['name']} - time taken: {s['duration']:.2f}s"
+                )
                 i += 1
 
         return "\n".join(lines)
@@ -870,8 +1124,14 @@ class Executor:
     def _get_user_confirmation(self, task_count, step_count):
         """Prompts user for confirmation."""
         while True:
-            response = input(f"Plan loaded with {task_count} tasks ({step_count} steps). Are you sure you want to execute? [y/N]: ").lower().strip()
-            if response in ['y', 'yes']:
+            response = (
+                input(
+                    f"Plan loaded with {task_count} tasks ({step_count} steps). Are you sure you want to execute? [y/N]: "
+                )
+                .lower()
+                .strip()
+            )
+            if response in ["y", "yes"]:
                 return True
-            if response in ['n', 'no', '']:
+            if response in ["n", "no", ""]:
                 return False

@@ -8,7 +8,7 @@ import signal
 from pathlib import Path
 from datetime import datetime
 
-from config.settings import load_settings
+from config.settings import load_notifier_config, load_settings
 from config.logging_config import setup_logging
 from src.api import DqlOnlyError, run_manifest, run_sql
 
@@ -286,8 +286,9 @@ def main():
         "-t",
         type=str,
         help="Named DB target (DB_TARGET_<NAME>_* in .env), e.g. MR3 or "
-        "ORACLE. Query mode only; supplies transport + secrets so no "
-        "default DB_* connection is needed.",
+        "MR3DUCK. Works in query AND manifest mode; supplies transport + "
+        "secrets so no default DB_* connection is needed. An ssh+duckdb "
+        "target runs the whole manifest on one persistent DuckDB session.",
     )
 
     # Plan inspection
@@ -379,11 +380,17 @@ def main():
             )
         return
 
-    # 4. Load configuration for manifest mode.
+    # 4. Load configuration for manifest mode. With --target the named
+    #    target supplies the connection, so the DB_* block is not
+    #    required — only the notifier settings are read.
     try:
-        settings = load_settings()
-        db_config = settings["db"]
-        notifier_config = settings["notifier"]
+        if args.target:
+            db_config = None
+            notifier_config = load_notifier_config()
+        else:
+            settings = load_settings()
+            db_config = settings["db"]
+            notifier_config = settings["notifier"]
     except Exception as e:
         log.critical(f"Failed to load configuration: {e}")
         sys.exit(1)
@@ -402,6 +409,8 @@ def main():
             dry_run=args.dry_run,
             force=args.force,
             enable_all=args.enable_all,
+            target=args.target,
+            plan_dir=args.plan_dir,
         )
 
     except Exception as e:
