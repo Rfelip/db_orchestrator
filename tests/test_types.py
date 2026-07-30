@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.types import Step, ManifestConfig
+from src.types import ManifestConfig, Step, expand_foreach
 
 
 class TestStepFromDict:
@@ -108,3 +108,147 @@ class TestManifestConfigFromDict:
     def test_steps_must_be_list(self):
         with pytest.raises(ValueError, match="'steps' must be a list"):
             ManifestConfig.from_dict({"steps": "oops"})
+
+    def test_foreach_expands_at_manifest_load(self):
+        m = ManifestConfig.from_dict(
+            {
+                "steps": [
+                    {"name": "before", "type": "sql"},
+                    {"name": "fan", "type": "sql", "foreach": {"bkt": [0, 1, 2]}},
+                    {"name": "after", "type": "sql"},
+                ],
+            }
+        )
+        assert [s.name for s in m.steps] == [
+            "before",
+            "fan_bkt0",
+            "fan_bkt1",
+            "fan_bkt2",
+            "after",
+        ]
+        assert all(s.foreach == {} for s in m.steps)
+
+
+class TestForeach:
+    """The declared-repetition construct: single axis, cross product,
+    and the validation that keeps `foreach` from loosening the schema."""
+
+    def test_single_axis_list(self):
+        steps = expand_foreach(
+            Step.from_dict(
+                {
+                    "name": "load",
+                    "type": "sql",
+                    "params": {"out": "/data"},
+                    "foreach": {"bkt": [0, 1, 15]},
+                }
+            )
+        )
+        assert [s.name for s in steps] == ["load_bkt00", "load_bkt01", "load_bkt15"]
+        assert [s.params["bkt"] for s in steps] == [0, 1, 15]
+        # Base params survive alongside the axis value.
+        assert all(s.params["out"] == "/data" for s in steps)
+
+    def test_zero_padding_follows_widest_value(self):
+        one_digit = expand_foreach(
+            Step.from_dict({"name": "s", "type": "sql", "foreach": {"n": [1, 2]}})
+        )
+        assert [s.name for s in one_digit] == ["s_n1", "s_n2"]
+        four_digit = expand_foreach(
+            Step.from_dict(
+                {"name": "s", "type": "sql", "foreach": {"year": [2017, 2018]}}
+            )
+        )
+        assert [s.name for s in four_digit] == ["s_year2017", "s_year2018"]
+
+    def test_cross_product_last_axis_fastest(self):
+        steps = expand_foreach(
+            Step.from_dict(
+                {
+                    "name": "qx",
+                    "type": "sql",
+                    "foreach": {"bkt": [0, 1], "year": [2017, 2018, 2019]},
+                }
+            )
+        )
+        assert len(steps) == 6
+        assert [s.name for s in steps] == [
+            "qx_bkt0_year2017",
+            "qx_bkt0_year2018",
+            "qx_bkt0_year2019",
+            "qx_bkt1_year2017",
+            "qx_bkt1_year2018",
+            "qx_bkt1_year2019",
+        ]
+        assert steps[4].params == {"bkt": 1, "year": 2018}
+
+    def test_reference_pipeline_shape(self):
+        """16 buckets x 9 years — the tábua pipeline's actual fan-out."""
+        steps = expand_foreach(
+            Step.from_dict(
+                {
+                    "name": "p",
+                    "type": "sql",
+                    "foreach": {
+                        "bkt": list(range(16)),
+                        "year": list(range(2017, 2026)),
+                    },
+                }
+            )
+        )
+        assert len(steps) == 144
+        assert len({s.name for s in steps}) == 144
+        assert steps[0].name == "p_bkt00_year2017"
+        assert steps[-1].name == "p_bkt15_year2025"
+
+    def test_no_foreach_passes_through(self):
+        step = Step.from_dict({"name": "solo", "type": "sql"})
+        assert expand_foreach(step) == [step]
+
+    def test_non_integer_values_are_not_padded(self):
+        steps = expand_foreach(
+            Step.from_dict(
+                {"name": "s", "type": "sql", "foreach": {"sexo": ["M", "F"]}}
+            )
+        )
+        assert [s.name for s in steps] == ["s_sexoM", "s_sexoF"]
+
+    def test_unknown_key_still_rejected(self):
+        # foreach widens the schema by exactly one key, not by any key.
+        with pytest.raises(ValueError, match="unknown keys"):
+            Step.from_dict({"name": "x", "type": "sql", "for_each": {"bkt": [0]}})
+        with pytest.raises(ValueError, match="unknown keys"):
+            Step.from_dict(
+                {"name": "x", "type": "sql", "foreach": {"bkt": [0]}, "matrix": {}}
+            )
+
+    def test_empty_foreach_rejected(self):
+        with pytest.raises(ValueError, match="non-empty mapping"):
+            Step.from_dict({"name": "x", "type": "sql", "foreach": {}})
+
+    def test_foreach_must_be_a_mapping(self):
+        with pytest.raises(ValueError, match="non-empty mapping"):
+            Step.from_dict({"name": "x", "type": "sql", "foreach": [0, 1]})
+
+    def test_empty_axis_rejected(self):
+        with pytest.raises(ValueError, match="non-empty list"):
+            Step.from_dict({"name": "x", "type": "sql", "foreach": {"bkt": []}})
+
+    def test_scalar_axis_rejected(self):
+        with pytest.raises(ValueError, match="non-empty list"):
+            Step.from_dict({"name": "x", "type": "sql", "foreach": {"bkt": 16}})
+
+    def test_axis_colliding_with_params_rejected(self):
+        with pytest.raises(ValueError, match="also set in params"):
+            Step.from_dict(
+                {
+                    "name": "x",
+                    "type": "sql",
+                    "params": {"bkt": 3},
+                    "foreach": {"bkt": [0, 1]},
+                }
+            )
+
+    def test_axis_name_must_be_an_identifier(self):
+        with pytest.raises(ValueError, match="not a valid param name"):
+            Step.from_dict({"name": "x", "type": "sql", "foreach": {"a b": [1]}})

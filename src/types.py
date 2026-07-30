@@ -8,12 +8,20 @@ fields keep their `None` default so existing manifests stay valid.
 `Step.from_dict(...)` is the single ingress point. Internal code reads
 fields via attribute access (`step.name`, `step.transaction_group`)
 rather than `.get()`-style dict access.
+
+Repetition is *declared* with `foreach:` and expanded by
+`ManifestConfig.from_dict`, so everything downstream of manifest load
+sees concrete steps only and needs no loop concept of its own.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import itertools
+import logging
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, NewType
+
+log = logging.getLogger(__name__)
 
 
 StepName = NewType("StepName", str)
@@ -51,6 +59,7 @@ _RECOGNISED_KEYS = frozenset(
         "notify",
         "ping_on_end",
         "ping_on_error",
+        "foreach",
     }
 )
 
@@ -100,6 +109,12 @@ class Step:
     ping_on_end: str | None = None
     ping_on_error: str | None = None
 
+    # Declared repetition. Each key is a param name, each value the list
+    # it ranges over; several keys mean their cross product. Empty on
+    # every step the executor ever sees — `ManifestConfig.from_dict`
+    # expands it away at load.
+    foreach: Mapping[str, list[Any]] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "Step":
         """Build a Step from a YAML-loaded dict. Raises ValueError on
@@ -137,6 +152,7 @@ class Step:
                 f"step '{raw['name']}': cleanup_mode must be 'drop' or "
                 f"'truncate', got '{cleanup_mode}'"
             )
+        params = dict(raw.get("params") or {})
         return cls(
             name=StepName(raw["name"]),
             type=raw["type"],
@@ -144,7 +160,7 @@ class Step:
             description=raw.get("description"),
             file=raw.get("file"),
             sql_id=raw.get("sql_id"),
-            params=dict(raw.get("params") or {}),
+            params=params,
             transaction_group=GroupId(raw["transaction_group"])
             if raw.get("transaction_group")
             else None,
@@ -159,7 +175,84 @@ class Step:
             notify=bool(raw.get("notify", False)),
             ping_on_end=raw.get("ping_on_end"),
             ping_on_error=raw.get("ping_on_error"),
+            foreach=_validated_foreach(raw.get("foreach"), raw["name"], params),
         )
+
+
+def _validated_foreach(
+    raw: Any, step_name: str, params: Mapping[str, Any]
+) -> dict[str, list[Any]]:
+    """Validate a step's `foreach:` block into `{axis: [values]}`.
+
+    An axis whose name already appears in `params` is rejected rather
+    than silently overridden: `params: {bkt: 3}` next to
+    `foreach: {bkt: [0, 1]}` is a contradiction, and picking a winner
+    would hide it."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping) or not raw:
+        raise ValueError(
+            f"step '{step_name}': foreach must be a non-empty mapping of "
+            f"axis -> list of values, got {raw!r}"
+        )
+    axes: dict[str, list[Any]] = {}
+    for axis, values in raw.items():
+        if not isinstance(axis, str) or not axis.isidentifier():
+            raise ValueError(
+                f"step '{step_name}': foreach axis {axis!r} is not a valid param name"
+            )
+        if not isinstance(values, list) or not values:
+            raise ValueError(
+                f"step '{step_name}': foreach axis '{axis}' must be a "
+                f"non-empty list, got {values!r}"
+            )
+        if axis in params:
+            raise ValueError(
+                f"step '{step_name}': foreach axis '{axis}' is also set in "
+                f"params — remove one."
+            )
+        axes[axis] = list(values)
+    return axes
+
+
+def _suffix(axis: str, value: Any, width: int) -> str:
+    """`_bkt00`, `_year2017`. Integers are zero-padded to the widest
+    value on their axis so expanded names sort the way the values do."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"_{axis}{value:0{width}d}"
+    return f"_{axis}{value}"
+
+
+def _axis_width(values: list[Any]) -> int:
+    ints = [v for v in values if isinstance(v, int) and not isinstance(v, bool)]
+    return max((len(str(v)) for v in ints), default=1)
+
+
+def expand_foreach(step: Step) -> list[Step]:
+    """One declared step becomes the cross product of its `foreach` axes.
+
+    Axes expand in declaration order with the LAST one varying fastest,
+    i.e. the nesting a reader writing `for bkt: for year:` would expect.
+    A step with no `foreach` passes through untouched, so this is safe
+    to map over every manifest.
+    """
+    if not step.foreach:
+        return [step]
+    axes = list(step.foreach)
+    widths = {a: _axis_width(step.foreach[a]) for a in axes}
+    expanded: list[Step] = []
+    for combo in itertools.product(*(step.foreach[a] for a in axes)):
+        assignment = dict(zip(axes, combo))
+        suffix = "".join(_suffix(a, assignment[a], widths[a]) for a in axes)
+        expanded.append(
+            replace(
+                step,
+                name=StepName(f"{step.name}{suffix}"),
+                params={**step.params, **assignment},
+                foreach={},
+            )
+        )
+    return expanded
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,13 +267,27 @@ class ManifestConfig:
         (a `SqlCatalog`), every step that uses `sql_id:` instead of
         `file:` is resolved into a step with `file:` set, so downstream
         code never has to know whether the path came from a catalog or
-        from inline manifest text."""
+        from inline manifest text.
+
+        Steps declaring `foreach:` are expanded here, so `steps` is
+        always the concrete execution list."""
         if not isinstance(raw, Mapping):
             raise ValueError(f"manifest must be a mapping, got {type(raw).__name__}")
         raw_steps = raw.get("steps") or []
         if not isinstance(raw_steps, list):
             raise ValueError("manifest 'steps' must be a list")
-        steps = [Step.from_dict(s) for s in raw_steps]
+        declared = [Step.from_dict(s) for s in raw_steps]
+        steps = [e for s in declared for e in expand_foreach(s)]
+        if len(steps) != len(declared):
+            # Expanded names exist nowhere in the source YAML, so
+            # `YamlManager.disable_step` can never match them: a foreach
+            # manifest is never rewritten, and never resumable that way.
+            log.warning(
+                "foreach expanded %d declared steps into %d — expanded steps "
+                "are not auto-disabled in the manifest on completion.",
+                len(declared),
+                len(steps),
+            )
         if catalog is not None:
             steps = [_resolve_sql_id(s, catalog) for s in steps]
         return cls(steps=steps)
@@ -192,6 +299,4 @@ def _resolve_sql_id(step: "Step", catalog) -> "Step":
     if step.sql_id is None:
         return step
     entry = catalog.resolve(step.sql_id)
-    from dataclasses import replace
-
     return replace(step, file=entry.file, sql_id=None)
