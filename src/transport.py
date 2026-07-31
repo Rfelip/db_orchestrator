@@ -331,6 +331,43 @@ def apply_settings(con, cfg):
     path = os.path.join(tmp, PROFILE_FILE)
     con.execute("SET enable_profiling='json'")
     con.execute("SET profiling_output='%s'" % _lit(path))
+    # profiling_coverage='SELECT' e o PADRAO, e ele NAO perfila CREATE TABLE AS.
+    # Isso escondia o passo mais caro do contratos_por_ano: o PASS 1 dele e um
+    # `CREATE OR REPLACE TEMP TABLE ... AS`, onde mora ~84% do tempo. Com o
+    # padrao, o perfil daquele passo mostrava so o COPY final e mentia por
+    # omissao. 'ALL' cobre DDL e COPY tambem.
+    con.execute("SET profiling_coverage='ALL'")
+    # Metricas ALEM do padrao. As duas primeiras sao as que respondem
+    # "isto e I/O ou CPU?" com MEDICAO em vez de inferencia pelo nome do
+    # operador — que era a ressalva honesta do primeiro perfil. As de memoria
+    # e temp dir dizem se o passo derramou, que nenhum tempo por operador conta.
+    con.execute(
+        "SET custom_profiling_settings='%s'"
+        % _lit(
+            json.dumps(
+                {
+                    m: "true"
+                    for m in (
+                        "OPERATOR_NAME",
+                        "OPERATOR_TYPE",
+                        "OPERATOR_TIMING",
+                        "OPERATOR_CARDINALITY",
+                        "OPERATOR_ROWS_SCANNED",
+                        "EXTRA_INFO",
+                        "LATENCY",
+                        "CPU_TIME",
+                        "BLOCKED_THREAD_TIME",
+                        "ROWS_RETURNED",
+                        "TOTAL_BYTES_READ",
+                        "TOTAL_BYTES_WRITTEN",
+                        "SYSTEM_PEAK_BUFFER_MEMORY",
+                        "SYSTEM_PEAK_TEMP_DIR_SIZE",
+                        "TOTAL_MEMORY_ALLOCATED",
+                    )
+                }
+            )
+        )
+    )
     return path
 
 

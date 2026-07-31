@@ -10,8 +10,16 @@ itself happens in the remote helper (`src.transport.DUCKDB_HELPER`).
 
 Plans are stored per run and per step:
 
-    <root>/<run_id>/index.jsonl        one line per statement
-    <root>/<run_id>/001_<step>.json    the raw DuckDB profile
+    <root>/<run_id>/001_<step>.json    the raw DuckDB profile, verbatim
+    <root>/<run_id>/index.jsonl        one line per statement (top-6 operators)
+    <root>/<run_id>/operadores.jsonl   PARSED: one line per operator, whole tree
+    <root>/<run_id>/statements.jsonl   PARSED: per-statement totals, incl. bytes
+                                       read/written and peak spill
+
+The raw file is never derived from and never rewritten: if the parsed form
+is wrong, it is where you start over. The parsed pair exists so an analysis
+is a SQL query over `read_json_auto(...)` instead of a fresh tree-walk
+written by hand each time.
 
 `index.jsonl` is the part meant to be read: keyed by run id and step
 name, so the same step is comparable across runs. `summarize_run` folds
@@ -99,6 +107,106 @@ def parse_profile(profile: Mapping[str, Any]) -> tuple[OperatorCost, ...]:
 
     walk(profile)
     return tuple(sorted(found, key=lambda op: -op.seconds))
+
+
+_CLASSE = {
+    "leitura": frozenset(
+        {
+            "PARQUET_SCAN",
+            "READ_PARQUET",
+            "TABLE_SCAN",
+            "SEQ_SCAN",
+            "READ_CSV",
+            "ARROW_SCAN",
+        }
+    ),
+    "escrita": frozenset(
+        {
+            "COPY_TO_FILE",
+            "BATCH_COPY_TO_FILE",
+            "HIVE_PARTITION_WRITE",
+            "INSERT",
+            "CREATE_TABLE_AS",
+            "BATCH_CREATE_TABLE_AS",
+        }
+    ),
+}
+
+
+def classe_do_operador(nome: str) -> str:
+    """Rótulo grosseiro por nome de operador.
+
+    Não é medição: o DuckDB não diz "isto foi I/O". Desde 2026-07-31 o perfil
+    também traz TOTAL_BYTES_READ/WRITTEN, que são medição de verdade — prefira
+    aqueles para responder I/O-vs-CPU, e use este rótulo só para agrupar."""
+    n = nome.upper()
+    for rotulo, nomes in _CLASSE.items():
+        if n in nomes:
+            return rotulo
+    return "cpu"
+
+
+def achata_operadores(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """A árvore inteira, um dicionário por operador, com profundidade e caminho.
+
+    `parse_profile` devolve só nome/tempo/cardinalidade ordenados, e o índice
+    guarda os 6 maiores — bom para skimming, insuficiente para analisar. Esta é a
+    forma PARSEADA que vai para `operadores.jsonl`: completa, plana e consultável
+    por SQL, sem ninguém ter de reabrir o JSON cru e reimplementar a travessia
+    (que foi exatamente como um `awk` meu concatenou dois números e produziu
+    "0.780.11" em 2026-07-31)."""
+    linhas: list[dict[str, Any]] = []
+
+    def anda(no: Mapping[str, Any], prof: int, caminho: str) -> None:
+        nome = str(no.get("operator_name") or "")
+        aqui = f"{caminho}/{nome}" if nome else caminho
+        if nome:
+            extra = no.get("extra_info") or {}
+            linhas.append(
+                {
+                    "profundidade": prof,
+                    "caminho": aqui,
+                    "operador": nome,
+                    "tipo": no.get("operator_type"),
+                    "classe": classe_do_operador(nome),
+                    "segundos": float(no.get("operator_timing") or 0.0),
+                    "cardinalidade": int(no.get("operator_cardinality") or 0),
+                    "linhas_varridas": int(no.get("operator_rows_scanned") or 0),
+                    "extra": {
+                        k: str(v)[:400]
+                        for k, v in (
+                            extra.items() if isinstance(extra, Mapping) else []
+                        )
+                    },
+                }
+            )
+        for filho in no.get("children") or []:
+            if isinstance(filho, Mapping):
+                anda(filho, prof + 1 if nome else prof, aqui)
+
+    anda(profile, 0, "")
+    return linhas
+
+
+_TOTAIS = (
+    "latency",
+    "cpu_time",
+    "blocked_thread_time",
+    "rows_returned",
+    "total_bytes_read",
+    "total_bytes_written",
+    "system_peak_buffer_memory",
+    "system_peak_temp_dir_size",
+    "total_memory_allocated",
+)
+
+
+def totais_do_perfil(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Os totais do statement — inclusive bytes lidos/escritos e pico de spill.
+
+    São eles que respondem "I/O ou CPU?" sem inferência: bytes são bytes, e
+    `system_peak_temp_dir_size > 0` é a prova de que o passo derramou."""
+    return {k: profile.get(k) for k in _TOTAIS if profile.get(k) is not None}
 
 
 def profile_rows(profile: Mapping[str, Any]) -> int:
@@ -209,6 +317,8 @@ class PlanStore:
         self._seq += 1
         self.dir.mkdir(parents=True, exist_ok=True)
         filename = f"{self._seq:03d}_{_safe_name(step)}.json"
+        # 1. o plano ORIGINAL, exatamente como o DuckDB o emitiu. Nunca derivado:
+        #    se a forma parseada estiver errada, é daqui que se recomeça.
         (self.dir / filename).write_text(json.dumps(profile), encoding="utf-8")
         plan = StepPlan(
             seq=self._seq,
@@ -220,6 +330,38 @@ class PlanStore:
         )
         with (self.dir / "index.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(_plan_as_dict(plan)) + "\n")
+        # 2. a forma PARSEADA: a árvore inteira achatada, uma linha por operador,
+        #    mais os totais do statement. É o que se consulta com SQL —
+        #    `SELECT ... FROM read_json_auto('operadores.jsonl')` — em vez de
+        #    reabrir o JSON cru e reimplementar a travessia a cada análise.
+        totais = totais_do_perfil(profile)
+        with (self.dir / "operadores.jsonl").open("a", encoding="utf-8") as handle:
+            for linha in achata_operadores(profile):
+                handle.write(
+                    json.dumps(
+                        {
+                            "run_id": self.run_id,
+                            "seq": self._seq,
+                            "step": step,
+                            **linha,
+                        }
+                    )
+                    + "\n"
+                )
+        with (self.dir / "statements.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "run_id": self.run_id,
+                        "seq": self._seq,
+                        "step": step,
+                        "segundos_parede": seconds,
+                        "perfil": filename,
+                        **totais,
+                    }
+                )
+                + "\n"
+            )
         return plan
 
     def summary(self) -> RunSummary:
