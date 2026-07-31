@@ -390,16 +390,56 @@ def take_profile(path):
 
 
 def run(con, sql, profile_path):
+    """Roda o SQL do passo e devolve UM perfil POR STATEMENT.
+
+    Um .sql de passo pode ter varios statements (o contratos_por_ano tem tres:
+    CREATE TEMP TABLE, COPY, DROP). Executar tudo num `con.execute(sql)` so
+    fazia o DuckDB sobrescrever `profiling_output` a cada statement, entao
+    sobrava apenas o perfil do ULTIMO — no contratos_por_ano, o do DROP. Pior:
+    `plans.py` usa a latencia do perfil como tempo do passo, entao o passo
+    aparecia com 0,05 s em vez dos ~20 s reais. Dividir com
+    `con.extract_statements` (que respeita strings e comentarios, ao contrario
+    de partir por ';') e colher o perfil apos CADA statement conserta os dois.
+    """
     start = time.perf_counter()
-    cur = con.execute(sql)
-    description = cur.description
-    columns = [d[0].lower() for d in description] if description else []
-    rows = cur.fetchall() if description else []
+    statements = None
+    if profile_path:
+        try:
+            statements = con.extract_statements(sql)
+        except Exception:  # noqa: BLE001 — split e otimizacao, nao correcao
+            statements = None
+    if not statements or len(statements) <= 1:
+        cur = con.execute(sql)
+        description = cur.description
+        columns = [d[0].lower() for d in description] if description else []
+        rows = cur.fetchall() if description else []
+        profile = take_profile(profile_path)
+        return {
+            "columns": columns,
+            "rows": rows,
+            "elapsed_ms": int((time.perf_counter() - start) * 1000),
+            "profile": profile,
+            "profiles": [profile] if profile else [],
+        }
+    profiles = []
+    columns, rows = [], []
+    for statement in statements:
+        cur = con.execute(statement)
+        description = cur.description
+        # so o ultimo statement com resultado define a resposta; os anteriores
+        # sao DDL/COPY. Manter o comportamento de antes para quem consome linhas.
+        if description:
+            columns = [d[0].lower() for d in description]
+            rows = cur.fetchall()
+        profile = take_profile(profile_path)
+        if profile:
+            profiles.append(profile)
     return {
         "columns": columns,
         "rows": rows,
         "elapsed_ms": int((time.perf_counter() - start) * 1000),
-        "profile": take_profile(profile_path),
+        "profile": profiles[-1] if profiles else None,
+        "profiles": profiles,
     }
 
 

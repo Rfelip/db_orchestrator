@@ -173,7 +173,9 @@ class DuckDbSession:
         columns = list(response.get("columns") or [])
         rows = [tuple(r) for r in response.get("rows") or []]
         self._record_plan(
-            step or f"stmt_{request_id}", elapsed_ms, response.get("profile")
+            step or f"stmt_{request_id}",
+            elapsed_ms,
+            response.get("profiles") or response.get("profile"),
         )
         return classify(sql, columns, rows, elapsed_ms)
 
@@ -216,9 +218,33 @@ class DuckDbSession:
         return json.loads(line)
 
     def _record_plan(self, step: str, elapsed_ms: int, profile: Any) -> None:
-        if self._plans is None or not isinstance(profile, dict):
+        """Registra UM plano por statement do passo.
+
+        O helper devolve `profiles` (lista) desde 2026-07-31; `profile` (um só)
+        continua aceito para não quebrar um helper antigo. Passos de vários
+        statements ganham um sufixo `#N` no nome, senão os três statements do
+        contratos_por_ano colidiriam sob o mesmo nome e só o último sobreviveria
+        à leitura do índice. O tempo de parede do passo é atribuído ao ÚLTIMO
+        statement: é uma medida do passo, não de cada statement, e reparti-la
+        seria inventar número."""
+        if self._plans is None:
             return
-        self._plans.record(step=step, seconds=elapsed_ms / 1000.0, profile=profile)
+        perfis = (
+            [p for p in profile if isinstance(p, dict)]
+            if isinstance(profile, list)
+            else [profile]
+            if isinstance(profile, dict)
+            else []
+        )
+        if not perfis:
+            return
+        for i, perfil in enumerate(perfis, start=1):
+            nome = step if len(perfis) == 1 else f"{step}#{i}"
+            self._plans.record(
+                step=nome,
+                seconds=elapsed_ms / 1000.0 if i == len(perfis) else 0.0,
+                profile=perfil,
+            )
 
     def _request_shutdown(self) -> None:
         stdin = self._proc.stdin
