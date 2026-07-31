@@ -202,11 +202,15 @@ def achata_operadores(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
                         else None
                     ),
                     "linhas_varridas": int(no.get("operator_rows_scanned") or 0),
-                    # O DuckDB expõe DOZE campos por operador; até 2026-07-31
-                    # este achatamento pegava seis. Os quatro abaixo são os que
-                    # faltavam e que dizem coisas que o tempo não diz:
-                    # `pico_temp` é spill POR OPERADOR — é ele que responde
-                    # "quem derramou", que o total por statement não localiza.
+                    # O DuckDB expõe doze campos por operador; este achatamento
+                    # pegava seis. Estes três faltavam e são preenchidos de fato.
+                    #
+                    # ⚠ system_peak_buffer_memory e system_peak_temp_dir_size
+                    #   também existem por operador, e vêm SEMPRE ZERADOS
+                    #   (medido na bancada, 2026-07-31). Não estão aqui de
+                    #   propósito: um campo que nunca enche parece medição e é
+                    #   ruído. Derramamento só se sabe por STATEMENT — e mesmo lá
+                    #   é pico acumulado da sessão, não do statement.
                     "cpu_segundos": float(no.get("cpu_time") or 0.0),
                     "cardinalidade_acumulada": int(
                         no.get("cumulative_cardinality") or 0
@@ -214,8 +218,6 @@ def achata_operadores(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "linhas_varridas_acumuladas": int(
                         no.get("cumulative_rows_scanned") or 0
                     ),
-                    "pico_memoria": int(no.get("system_peak_buffer_memory") or 0),
-                    "pico_temp": int(no.get("system_peak_temp_dir_size") or 0),
                     "extra": {
                         k: str(v)[:400]
                         for k, v in (
