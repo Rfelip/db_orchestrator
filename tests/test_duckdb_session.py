@@ -166,9 +166,19 @@ class TestProfileCapture:
         assert [s.step for s in summary.steps] == ["count_rows", "make_t"]
         assert all(s.seconds >= 0 for s in summary.steps)
         assert summary.operator_totals  # at least one operator was named
-        stored = sorted((tmp_path / "plans" / "RUN1").glob("*.json"))
+        run_dir = tmp_path / "plans" / "RUN1"
+        # Os perfis crus sao os numerados (001_, 002_, ...). Glob de "*.json"
+        # tambem pegaria configuracao.json e o teste passaria a contar artefatos
+        # em vez de statements.
+        stored = sorted(run_dir.glob("[0-9]*.json"))
         assert len(stored) == 2
         assert json.loads(stored[0].read_text())["latency"] >= 0
+        # As duas formas parseadas e o snapshot de configuracao andam junto do cru.
+        assert (run_dir / "operadores.jsonl").exists()
+        assert (run_dir / "statements.jsonl").exists()
+        assert (run_dir / "configuracao.json").exists()
+        config = json.loads((run_dir / "configuracao.json").read_text())
+        assert any(c["name"] == "threads" for c in config)
 
     def test_nothing_recorded_when_profiling_is_off(self, helper, settings, tmp_path):
         store = PlanStore(tmp_path / "plans", run_id="RUN2")

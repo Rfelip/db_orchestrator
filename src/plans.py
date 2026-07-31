@@ -202,6 +202,20 @@ def achata_operadores(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
                         else None
                     ),
                     "linhas_varridas": int(no.get("operator_rows_scanned") or 0),
+                    # O DuckDB expõe DOZE campos por operador; até 2026-07-31
+                    # este achatamento pegava seis. Os quatro abaixo são os que
+                    # faltavam e que dizem coisas que o tempo não diz:
+                    # `pico_temp` é spill POR OPERADOR — é ele que responde
+                    # "quem derramou", que o total por statement não localiza.
+                    "cpu_segundos": float(no.get("cpu_time") or 0.0),
+                    "cardinalidade_acumulada": int(
+                        no.get("cumulative_cardinality") or 0
+                    ),
+                    "linhas_varridas_acumuladas": int(
+                        no.get("cumulative_rows_scanned") or 0
+                    ),
+                    "pico_memoria": int(no.get("system_peak_buffer_memory") or 0),
+                    "pico_temp": int(no.get("system_peak_temp_dir_size") or 0),
                     "extra": {
                         k: str(v)[:400]
                         for k, v in (
@@ -335,6 +349,18 @@ class PlanStore:
         self.run_id = run_id or new_run_id()
         self.dir = Path(root) / self.run_id
         self._seq = 0
+
+    def registra_configuracao(self, settings: Iterable[Mapping[str, Any]]) -> None:
+        """Grava COM QUE configuração esta execução rodou.
+
+        Sem isto, comparar duas execuções é comparar dois números sem saber se
+        rodaram com o mesmo `threads`, `memory_limit` ou `preserve_insertion_order`
+        — e foi exatamente assim que uma medição minha de 2026-07-31 ficou 2,5x
+        fora do ledger sem explicação. 135 chaves, alguns KB, uma vez por execução."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / "configuracao.json").write_text(
+            json.dumps(list(settings), indent=1), encoding="utf-8"
+        )
 
     def record(
         self, *, step: str, seconds: float, profile: Mapping[str, Any]

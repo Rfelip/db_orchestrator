@@ -155,6 +155,10 @@ class DuckDbSession:
         if not hello.get("ready"):
             raise SessionError(f"helper did not report ready: {hello!r}")
         version = str(hello.get("duckdb", "?"))
+        # A configuração efetiva vem no handshake e é gravada uma vez por
+        # execução: é ela que diz se duas medições são comparáveis.
+        if self._plans is not None and hello.get("settings"):
+            self._plans.registra_configuracao(hello["settings"])
         log.info("DuckDB session up (duckdb %s)", version)
         return version
 

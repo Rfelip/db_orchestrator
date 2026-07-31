@@ -337,45 +337,19 @@ def apply_settings(con, cfg):
     # padrao, o perfil daquele passo mostrava so o COPY final e mentia por
     # omissao. 'ALL' cobre DDL e COPY tambem.
     con.execute("SET profiling_coverage='ALL'")
-    # Metricas ALEM do padrao.
+    # SEM custom_profiling_settings, de proposito. Medido na bancada
+    # (tests/perfil/sonda_duckdb.py, 2026-07-31): o PADRAO traz 21 campos de topo
+    # e 12 por operador; uma lista curada por mim trazia 14 e 12. Ou seja, curar
+    # so PERDE informacao — o default ja e o superconjunto, e nao cobra por isso
+    # (1,47s vs 1,26s na mesma consulta, dentro do ruido).
     #
-    # ⚠ TOTAL_BYTES_READ/WRITTEN NAO medem leitura de arquivo externo. Medido
-    #   2026-07-31: varrer um parquet de 0,84 GB reporta 209 KB. Sao bytes do
-    #   buffer manager / temp, nao do parquet. Ficam coletados porque custam
-    #   nada e ajudam a ver spill, mas NAO respondem "isto e I/O ou CPU?" —
-    #   para isso o que serve e BLOCKED_THREAD_TIME (thread esperando) e
-    #   CPU_TIME/LATENCY (quantas threads de fato ocupadas).
+    # profiling_mode='DETAILED' tambem nao entra: medido, da exatamente o mesmo
+    # conjunto de campos que STANDARD.
     #
-    # SYSTEM_PEAK_TEMP_DIR_SIZE e pico da SESSAO, nao do statement: aparece
-    # igual em todos os statements de uma sessao persistente. Serve para dizer
-    # "esta execucao derramou X", nunca "este passo derramou X".
-    con.execute(
-        "SET custom_profiling_settings='%s'"
-        % _lit(
-            json.dumps(
-                {
-                    m: "true"
-                    for m in (
-                        "OPERATOR_NAME",
-                        "OPERATOR_TYPE",
-                        "OPERATOR_TIMING",
-                        "OPERATOR_CARDINALITY",
-                        "OPERATOR_ROWS_SCANNED",
-                        "EXTRA_INFO",
-                        "LATENCY",
-                        "CPU_TIME",
-                        "BLOCKED_THREAD_TIME",
-                        "ROWS_RETURNED",
-                        "TOTAL_BYTES_READ",
-                        "TOTAL_BYTES_WRITTEN",
-                        "SYSTEM_PEAK_BUFFER_MEMORY",
-                        "SYSTEM_PEAK_TEMP_DIR_SIZE",
-                        "TOTAL_MEMORY_ALLOCATED",
-                    )
-                }
-            )
-        )
-    )
+    # ⚠ Sobre o que esses campos NAO sao: TOTAL_BYTES_READ/WRITTEN nao medem
+    #   leitura de arquivo externo (varrer 0,84 GB de parquet reporta 209 KB —
+    #   sao bytes do buffer manager). Quem responde "I/O ou CPU?" e
+    #   blocked_thread_time contra cpu_time/latency.
     return path
 
 
@@ -451,8 +425,28 @@ def run(con, sql, profile_path):
     }
 
 
+def snapshot_settings(con):
+    """Toda a configuracao efetiva da sessao, para gravar junto da execucao.
+
+    Comparar duas execucoes sem saber com que `threads`/`memory_limit` cada uma
+    rodou e comparar dois numeros sem unidade."""
+    try:
+        cur = con.execute(
+            "SELECT name, value FROM duckdb_settings() WHERE value <> '' ORDER BY name"
+        )
+        return [{"name": n, "value": str(v)} for n, v in cur.fetchall()]
+    except Exception:  # noqa: BLE001 — snapshot e diagnostico, nunca bloqueia
+        return []
+
+
 def serve(con, profile_path, stdin, stdout):
-    stdout.write(json.dumps({"ready": True, "duckdb": duckdb.__version__}) + "\n")
+    hello = {"ready": True, "duckdb": duckdb.__version__}
+    # So manda a configuracao quando ha profiling: com profiling desligado a
+    # execucao nao deve deixar artefato nenhum, e o snapshot faz parte do
+    # conjunto de artefatos de perfil, nao do caminho normal.
+    if profile_path:
+        hello["settings"] = snapshot_settings(con)
+    stdout.write(json.dumps(hello) + "\n")
     stdout.flush()
     while True:
         line = stdin.readline()
