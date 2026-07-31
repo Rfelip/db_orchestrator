@@ -148,6 +148,17 @@ def classe_do_operador(nome: str) -> str:
     return "cpu"
 
 
+def _inteiro(valor: Any) -> int | None:
+    """`Estimated Cardinality` vem como texto no extra_info. Sem exceção: um
+    campo informativo ilegível não pode derrubar a captura do plano."""
+    if valor is None:
+        return None
+    try:
+        return int(str(valor).strip().replace(",", "").replace(".", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def achata_operadores(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
     """A árvore inteira, um dicionário por operador, com profundidade e caminho.
 
@@ -164,6 +175,12 @@ def achata_operadores(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
         aqui = f"{caminho}/{nome}" if nome else caminho
         if nome:
             extra = no.get("extra_info") or {}
+            real = int(no.get("operator_cardinality") or 0)
+            estimada = (
+                _inteiro(extra.get("Estimated Cardinality"))
+                if isinstance(extra, Mapping)
+                else None
+            )
             linhas.append(
                 {
                     "profundidade": prof,
@@ -172,7 +189,18 @@ def achata_operadores(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "tipo": no.get("operator_type"),
                     "classe": classe_do_operador(nome),
                     "segundos": float(no.get("operator_timing") or 0.0),
-                    "cardinalidade": int(no.get("operator_cardinality") or 0),
+                    "cardinalidade": real,
+                    # A estimativa do otimizador, promovida de dentro do extra_info.
+                    # Vale de primeira classe porque a RAZÃO entre ela e a real é o
+                    # jeito clássico de achar plano ruim: o DuckDB escolhe ordem de
+                    # join e tamanho de hash table a partir dela, então um erro de
+                    # ordens de grandeza é causa, não sintoma.
+                    "cardinalidade_estimada": estimada,
+                    "erro_estimativa": (
+                        round(max(real, 1) / max(estimada, 1), 2)
+                        if estimada is not None
+                        else None
+                    ),
                     "linhas_varridas": int(no.get("operator_rows_scanned") or 0),
                     "extra": {
                         k: str(v)[:400]
