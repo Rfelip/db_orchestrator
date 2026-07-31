@@ -337,10 +337,18 @@ def apply_settings(con, cfg):
     # padrao, o perfil daquele passo mostrava so o COPY final e mentia por
     # omissao. 'ALL' cobre DDL e COPY tambem.
     con.execute("SET profiling_coverage='ALL'")
-    # Metricas ALEM do padrao. As duas primeiras sao as que respondem
-    # "isto e I/O ou CPU?" com MEDICAO em vez de inferencia pelo nome do
-    # operador — que era a ressalva honesta do primeiro perfil. As de memoria
-    # e temp dir dizem se o passo derramou, que nenhum tempo por operador conta.
+    # Metricas ALEM do padrao.
+    #
+    # ⚠ TOTAL_BYTES_READ/WRITTEN NAO medem leitura de arquivo externo. Medido
+    #   2026-07-31: varrer um parquet de 0,84 GB reporta 209 KB. Sao bytes do
+    #   buffer manager / temp, nao do parquet. Ficam coletados porque custam
+    #   nada e ajudam a ver spill, mas NAO respondem "isto e I/O ou CPU?" —
+    #   para isso o que serve e BLOCKED_THREAD_TIME (thread esperando) e
+    #   CPU_TIME/LATENCY (quantas threads de fato ocupadas).
+    #
+    # SYSTEM_PEAK_TEMP_DIR_SIZE e pico da SESSAO, nao do statement: aparece
+    # igual em todos os statements de uma sessao persistente. Serve para dizer
+    # "esta execucao derramou X", nunca "este passo derramou X".
     con.execute(
         "SET custom_profiling_settings='%s'"
         % _lit(

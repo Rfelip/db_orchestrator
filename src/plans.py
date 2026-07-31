@@ -136,9 +136,11 @@ _CLASSE = {
 def classe_do_operador(nome: str) -> str:
     """Rótulo grosseiro por nome de operador.
 
-    Não é medição: o DuckDB não diz "isto foi I/O". Desde 2026-07-31 o perfil
-    também traz TOTAL_BYTES_READ/WRITTEN, que são medição de verdade — prefira
-    aqueles para responder I/O-vs-CPU, e use este rótulo só para agrupar."""
+    Não é medição: o DuckDB não diz "isto foi I/O", e o rótulo serve só para
+    agrupar. ⚠ TOTAL_BYTES_READ/WRITTEN NÃO servem de alternativa — medido em
+    2026-07-31, varrer 0,84 GB de parquet reporta 209 KB (são bytes do buffer
+    manager, não do arquivo). Quem responde I/O-vs-CPU é `blocked_thread_time`
+    (thread parada esperando) contra `cpu_time / latency` (threads ocupadas)."""
     n = nome.upper()
     for rotulo, nomes in _CLASSE.items():
         if n in nomes:
