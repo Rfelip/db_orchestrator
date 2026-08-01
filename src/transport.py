@@ -318,6 +318,13 @@ def apply_settings(con, cfg):
     os.makedirs(tmp, exist_ok=True)
     con.execute("SET memory_limit='%s'" % _lit(cfg["memory_limit"]))
     con.execute("SET threads=%d" % int(cfg["threads"]))
+    # Cacheia o RODAPE dos parquets entre aberturas do mesmo arquivo. O pipeline
+    # abre o mesmo artefato dezenas de vezes na MESMA sessao — o
+    # `ano_nao_fechado_staged` sozinho e lido 96 vezes por 4 consumidores — e o
+    # orquestrador mantem UMA conexao para a execucao inteira, que e a condicao
+    # em que a doc do DuckDB diz que isto ajuda. So metadado; nao cacheia dado.
+    # (`enable_object_cache` NAO serve: virou placeholder documentado que nao faz nada.)
+    con.execute("SET parquet_metadata_cache=true")
     con.execute("SET temp_directory='%s'" % _lit(tmp))
     con.execute(
         "SET max_temp_directory_size='%s'" % _lit(cfg["max_temp_directory_size"])
