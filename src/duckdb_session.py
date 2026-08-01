@@ -219,7 +219,19 @@ class DuckDbSession:
                 f"session ended without answering (rc={self._proc.poll()})\n"
                 f"{self._stderr()}"
             )
-        return json.loads(line)
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError as exc:
+            # Uma linha que nao e JSON quer dizer que ALGUEM MAIS escreveu no
+            # stdout do helper — que e o canal do protocolo. Sem mostrar os
+            # bytes, isso chega como "Expecting ',' delimiter: column 8194" e
+            # nao diz nada sobre quem escreveu.
+            raise SessionError(
+                f"resposta nao e JSON ({exc}); {len(line)} bytes lidos.\n"
+                f"  inicio: {line[:120]!r}\n"
+                f"  no erro: {line[max(0, exc.pos - 60) : exc.pos + 60]!r}\n"
+                f"  fim: {line[-120:]!r}\n{self._stderr()}"
+            ) from exc
 
     def _record_plan(self, step: str, elapsed_ms: int, profile: Any) -> None:
         """Registra UM plano por statement do passo.
