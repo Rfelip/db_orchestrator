@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import re
 import sys
@@ -392,7 +393,17 @@ class Executor:
         single session already is the shared context those two labels
         exist to fake. What the session adds instead is real state — a
         `TEMP TABLE` from step N is there for step N+1.
+
+        Com `concurrency > 1` no alvo, os lotes de `foreach` POR BALDE saem
+        daqui para `_run_on_duckdb_concorrente`. O caminho serial abaixo fica
+        intocado e continua sendo o padrao.
         """
+        concorrencia = getattr(
+            getattr(self.duckdb_transport, "settings", None), "concurrency", 1
+        )
+        if concorrencia > 1:
+            return self._run_on_duckdb_concorrente(execution_queue, concorrencia)
+
         from src.duckdb_session import open_transport_session
 
         executed_steps = []
@@ -415,6 +426,128 @@ class Executor:
                     notify=True,
                 )
         return executed_steps
+
+    @staticmethod
+    def _lotes_por_balde(execution_queue):
+        """Fatia a fila em `(paralelizavel, [passos])`, preservando a ordem.
+
+        Um lote paralelizavel = execucoes CONSECUTIVAS de um mesmo `foreach:`
+        cujo UNICO eixo e `bkt`. Sao independentes por CONSTRUCAO: `bkt =
+        cpf_id % 16`, e cada execucao le e escreve apenas o seu `bkt=N`.
+
+        ⚠ `('bkt',)` EXATO, nao "tem bkt entre os eixos". Num produto
+        `bkt x year` as execucoes de um balde cobrem varios anos, e passo por
+        ano NAO tem essa prova — varios leem a saida do ano anterior. Hoje o
+        pipeline nao tem esse produto (18 passos so-`bkt`, 3 so-`year`), entao
+        a regra estrita nao custa nada; ela custa se alguem criar o produto
+        depois, que e exatamente quando se quer custar. Qualquer outra coisa
+        cai em lote serial de um passo so.
+        """
+        lotes: list[tuple[bool, list]] = []
+        for step in execution_queue:
+            origem = getattr(step, "foreach_origin", None)
+            paralelo = origem is not None and getattr(step, "foreach_axes", ()) == (
+                "bkt",
+            )
+            if (
+                paralelo
+                and lotes
+                and lotes[-1][0]
+                and getattr(lotes[-1][1][0], "foreach_origin", None) == origem
+            ):
+                lotes[-1][1].append(step)
+            else:
+                lotes.append((paralelo, [step]))
+        return lotes
+
+    def _run_on_duckdb_concorrente(self, execution_queue, concorrencia):
+        """Como `_run_on_duckdb`, mas com N sessoes para os lotes por balde.
+
+        Duas coisas ficam DELIBERADAMENTE seriais:
+
+        1. **A ordem entre lotes.** Um lote inteiro termina antes do proximo
+           comecar (barreira). Nada de analise de dependencia entre passos: a
+           unica independencia que esta PROVADA e a dos baldes.
+        2. **A escrituracao.** `_post_process_step` (ledger, yaml_manager,
+           resumo) roda depois da barreira, na ORDEM DA FILA. O `--resume` le o
+           ledger de cima para baixo; grava-lo fora de ordem faria uma retomada
+           parar no lugar errado.
+
+        Cada worker tem sessao propria — processo proprio, DuckDB proprio,
+        espaco de `TEMP TABLE` proprio e arquivo de perfil proprio (o `slot`).
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        from src.duckdb_session import open_transport_session
+
+        base = self.duckdb_transport.settings
+        log.info(
+            "concorrencia=%d · memory_limit por worker=%s (de %s no total)",
+            concorrencia,
+            base.for_slot(0).memory_limit,
+            base.memory_limit,
+        )
+
+        executed_steps = []
+        with contextlib.ExitStack() as pilha:
+            sessoes = [
+                pilha.enter_context(
+                    open_transport_session(
+                        self.duckdb_transport,
+                        base.for_slot(i),
+                        plans=self.plan_store,
+                    )
+                )
+                for i in range(concorrencia)
+            ]
+            executor = pilha.enter_context(ThreadPoolExecutor(max_workers=concorrencia))
+
+            for paralelo, passos in self._lotes_por_balde(execution_queue):
+                # mkdir antes de despachar: dois workers criando a mesma arvore
+                # de saida ao mesmo tempo e uma corrida que nao precisa existir.
+                for step in passos:
+                    self._prepare_output_dir(step)
+
+                if not paralelo or len(passos) == 1:
+                    duracoes = [self._executa_um(passos[0], sessoes[0])]
+                else:
+                    futuros = [
+                        executor.submit(
+                            self._executa_um, step, sessoes[i % concorrencia]
+                        )
+                        for i, step in enumerate(passos)
+                    ]
+                    # espera TODOS antes de olhar erro: um worker que estoura nao
+                    # pode deixar irmaos rodando contra uma sessao que vai fechar.
+                    duracoes = []
+                    falha = None
+                    for step, fut in zip(passos, futuros):
+                        try:
+                            duracoes.append(fut.result())
+                        except Exception as exc:  # noqa: BLE001
+                            duracoes.append(None)
+                            if falha is None:
+                                falha = (step, exc)
+                    if falha is not None:
+                        self._handle_step_error(falha[0], falha[1], None, notify=True)
+                        raise falha[1]
+
+                for step, duracao in zip(passos, duracoes):
+                    self._post_process_step(
+                        step,
+                        duracao,
+                        self.yaml_manager,
+                        executed_steps,
+                        notify=True,
+                    )
+        return executed_steps
+
+    def _executa_um(self, step, session):
+        """Um passo numa sessao. Devolve a duracao; erros sobem para o chamador,
+        que decide (o caminho serial reporta na hora, o concorrente na barreira)."""
+        inicio = time.time()
+        self._dispatch_duckdb_step(step, session)
+        return time.time() - inicio
 
     def _dispatch_duckdb_step(self, step, session):
         """Route one step onto the DuckDB session.

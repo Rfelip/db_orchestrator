@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -351,6 +352,12 @@ class PlanStore:
         self.run_id = run_id or new_run_id()
         self.dir = Path(root) / self.run_id
         self._seq = 0
+        # `record()` incrementa `self._seq` e ANEXA a tres .jsonl compartilhados.
+        # Com sessoes concorrentes (DuckDbSettings.concurrency > 1) duas chamadas
+        # disputariam o contador e intercalariam metades de linha — os planos
+        # sairiam corrompidos EM SILENCIO, e e deles que sai toda medicao desta
+        # campanha. Sem concorrencia o lock nunca e disputado e nao custa nada.
+        self._lock = threading.Lock()
 
     def registra_configuracao(self, settings: Iterable[Mapping[str, Any]]) -> None:
         """Grava COM QUE configuração esta execução rodou.
@@ -372,54 +379,61 @@ class PlanStore:
         `seconds` is the caller's wall clock; DuckDB's own latency is
         preferred when the profile carries it, because it excludes the
         transport round trip."""
-        self._seq += 1
+        with self._lock:
+            self._seq += 1
+            seq = self._seq
         self.dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{self._seq:03d}_{_safe_name(step)}.json"
+        filename = f"{seq:03d}_{_safe_name(step)}.json"
         # 1. o plano ORIGINAL, exatamente como o DuckDB o emitiu. Nunca derivado:
         #    se a forma parseada estiver errada, é daqui que se recomeça.
+        #    Nome exclusivo por `seq`, então esta escrita não precisa do lock.
         (self.dir / filename).write_text(json.dumps(profile), encoding="utf-8")
         plan = StepPlan(
-            seq=self._seq,
+            seq=seq,
             step=step,
             seconds=profile_seconds(profile) or seconds,
             rows=profile_rows(profile),
             operators=parse_profile(profile)[:_TOP_OPERATORS],
             profile_file=filename,
         )
-        with (self.dir / "index.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(_plan_as_dict(plan)) + "\n")
         # 2. a forma PARSEADA: a árvore inteira achatada, uma linha por operador,
         #    mais os totais do statement. É o que se consulta com SQL —
         #    `SELECT ... FROM read_json_auto('operadores.jsonl')` — em vez de
         #    reabrir o JSON cru e reimplementar a travessia a cada análise.
         totais = totais_do_perfil(profile)
-        with (self.dir / "operadores.jsonl").open("a", encoding="utf-8") as handle:
-            for linha in achata_operadores(profile):
+        operadores = achata_operadores(profile)
+        # os três appends ficam sob o MESMO lock: escrever uma linha em modo "a"
+        # não é atômico, e duas sessões intercalariam metades de linha nos .jsonl.
+        with self._lock:
+            with (self.dir / "index.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(_plan_as_dict(plan)) + "\n")
+            with (self.dir / "operadores.jsonl").open("a", encoding="utf-8") as handle:
+                for linha in operadores:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "run_id": self.run_id,
+                                "seq": seq,
+                                "step": step,
+                                **linha,
+                            }
+                        )
+                        + "\n"
+                    )
+            with (self.dir / "statements.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(
                     json.dumps(
                         {
                             "run_id": self.run_id,
-                            "seq": self._seq,
+                            "seq": seq,
                             "step": step,
-                            **linha,
+                            "segundos_parede": seconds,
+                            "perfil": filename,
+                            **totais,
                         }
                     )
                     + "\n"
                 )
-        with (self.dir / "statements.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "run_id": self.run_id,
-                        "seq": self._seq,
-                        "step": step,
-                        "segundos_parede": seconds,
-                        "perfil": filename,
-                        **totais,
-                    }
-                )
-                + "\n"
-            )
         return plan
 
     def summary(self) -> RunSummary:

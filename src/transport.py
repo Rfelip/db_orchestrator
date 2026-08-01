@@ -32,7 +32,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -197,6 +197,38 @@ class SshWslTransport:
 
 _SIZE = re.compile(r"^\d+(\.\d+)?\s*(B|K|M|G|T|KB|MB|GB|TB|KIB|MIB|GIB|TIB)$", re.I)
 
+_UNIDADE_MIB = {
+    "B": 1 / 1048576,
+    "K": 1 / 1024,
+    "KB": 1 / 1024,
+    "KIB": 1 / 1024,
+    "M": 1,
+    "MB": 1,
+    "MIB": 1,
+    "G": 1024,
+    "GB": 1024,
+    "GIB": 1024,
+    "T": 1048576,
+    "TB": 1048576,
+    "TIB": 1048576,
+}
+
+
+def _divide_size(tamanho: str, partes: int) -> str:
+    """`('16GB', 2) -> '8192MiB'`. Divide um tamanho DuckDB em N fatias.
+
+    Devolve sempre MiB inteiro: dividir '1GB' por 3 em 'GB' daria '0GB', que o
+    DuckDB aceita como ZERO e derruba a sessao na primeira alocacao. MiB tem
+    resolucao suficiente para qualquer divisao plausivel e nunca arredonda para
+    baixo ate zero — o piso e 1 MiB, que falha alto e claro em vez de silencioso.
+    """
+    m = _SIZE.match(tamanho.strip())
+    if not m:
+        raise ValueError(f"tamanho invalido: {tamanho!r}")
+    numero = float(tamanho.strip()[: m.start(2)].strip())
+    mib = numero * _UNIDADE_MIB[m.group(2).upper()]
+    return f"{max(1, int(mib // partes))}MiB"
+
 
 def coerce_bool(value: Any) -> bool:
     """`.env` values arrive as strings; this is the one place that
@@ -232,6 +264,32 @@ class DuckDbSettings:
     preserve_insertion_order: bool = False
     profile: bool = False
 
+    concurrency: int = 1
+    """Quantas sessoes DuckDB rodam LADO A LADO as execucoes de um mesmo
+    `foreach` por balde. 1 (padrao) = comportamento historico, sessao unica.
+
+    ⚠ `memory_limit` e o orcamento do RUN INTEIRO, nao de cada sessao: com
+    `concurrency=N` cada worker recebe `memory_limit / N`. Isso e deliberado e e
+    o unico default seguro numa maquina compartilhada — o MR3 tem 30 GB, e dois
+    workers a 16 GB pediriam 32 GB. Com `concurrency=1` a conta e identica a
+    hoje, entao nenhuma configuracao existente muda de comportamento.
+
+    O preco e mais derramamento por worker. Medido nesta base: subir o teto de
+    16 para 20 GB valia ~9 s no total, porque o spill vai para NVMe — barato.
+    Dividir deve custar na mesma ordem, mas ISSO SE MEDE, nao se assume."""
+
+    slot: str = ""
+    """Sufixo que torna o arquivo de perfil EXCLUSIVO desta sessao.
+
+    O caminho do perfil e `<temp_directory>/_orch_profile<slot>.json`, e
+    `temp_directory` e COMPARTILHADO entre sessoes. Com o slot vazio (uma sessao
+    so, o padrao histórico) nada muda. Com sessoes concorrentes, duas delas
+    escreveriam no MESMO arquivo e cada uma leria o perfil da outra — os planos
+    capturados sairiam trocados sem nenhum erro, e todas as medicoes desta
+    campanha saem desses planos. Por isso o slot entra no NOME do arquivo, e nao
+    numa pasta por sessao: o `PlanStore` ja sabe achar o arquivo pelo caminho que
+    o helper devolve."""
+
     def __post_init__(self) -> None:
         if not _SIZE.match(self.memory_limit.strip()):
             raise ValueError(
@@ -251,6 +309,23 @@ class DuckDbSettings:
                 f"'512GB', got {self.max_temp_directory_size!r} — the host is "
                 f"shared, so an unbounded spill is not an option."
             )
+        if self.concurrency < 1:
+            raise ValueError(f"concurrency must be >= 1, got {self.concurrency}")
+
+    def for_slot(self, indice: int) -> "DuckDbSettings":
+        """As settings de UM worker: perfil proprio e a sua fatia de memoria.
+
+        Divide `memory_limit` por `concurrency` (ver o campo) e carimba um slot,
+        para que dois workers nao escrevam no mesmo `_orch_profile.json`. Com
+        `concurrency == 1` devolve `self` intacto — mesmo objeto, mesmo nome de
+        arquivo de perfil que sempre teve."""
+        if self.concurrency == 1:
+            return self
+        return replace(
+            self,
+            memory_limit=_divide_size(self.memory_limit, self.concurrency),
+            slot=f"_w{indice}",
+        )
 
     @classmethod
     def from_mapping(cls, cfg: Mapping[str, Any]) -> "DuckDbSettings":
@@ -268,6 +343,7 @@ class DuckDbSettings:
                 cfg.get("preserve_insertion_order", defaults.preserve_insertion_order)
             ),
             profile=coerce_bool(cfg.get("profile", defaults.profile)),
+            concurrency=int(cfg.get("concurrency") or defaults.concurrency),
         )
 
     def as_payload(self) -> dict[str, Any]:
@@ -283,6 +359,7 @@ class DuckDbSettings:
             "max_temp_directory_size": self.max_temp_directory_size,
             "preserve_insertion_order": self.preserve_insertion_order,
             "profile": self.profile,
+            "slot": self.slot,
         }
 
 
@@ -335,7 +412,11 @@ def apply_settings(con, cfg):
     )
     if not cfg.get("profile"):
         return None
-    path = os.path.join(tmp, PROFILE_FILE)
+    # o slot separa sessoes CONCORRENTES: `tmp` e compartilhado, entao sem ele
+    # duas sessoes escreveriam e liriam o mesmo _orch_profile.json e trocariam
+    # os planos entre si — em silencio. Slot vazio == nome historico.
+    slot = str(cfg.get("slot") or "")
+    path = os.path.join(tmp, PROFILE_FILE.replace(".json", "%s.json" % slot))
     con.execute("SET enable_profiling='json'")
     con.execute("SET profiling_output='%s'" % _lit(path))
     # profiling_coverage='SELECT' e o PADRAO, e ele NAO perfila CREATE TABLE AS.

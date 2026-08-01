@@ -53,6 +53,7 @@ def _expande_env(valor: Any, passo: str, chave: str) -> Any:
 
     return _ENV.sub(troca, valor)
 
+
 log = logging.getLogger(__name__)
 
 
@@ -155,6 +156,31 @@ class Step:
     # every step the executor ever sees — `ManifestConfig.from_dict`
     # expands it away at load.
     foreach: Mapping[str, list[Any]] = field(default_factory=dict)
+
+    foreach_origin: StepName | None = None
+    """De qual passo DECLARADO esta execucao saiu, quando veio de `foreach:`.
+
+    `expand_foreach` zera o `foreach` das copias que produz, entao sem isto a
+    execucao expandida nao sabe mais que era uma de N irmas independentes. Quem
+    precisa saber e o executor concorrente: as execucoes de um mesmo `foreach`
+    por BALDE sao independentes por construcao (`bkt = cpf_id % 16`, cada uma le
+    e escreve so o seu `bkt=N`), e sao o unico lote que ele pode paralelizar com
+    seguranca.
+
+    Deduzir isso de "passos consecutivos com o mesmo `file`" tambem funcionaria
+    hoje e passaria a mentir no dia em que dois passos distintos apontassem para
+    o mesmo .sql. Marcar na expansao e barato e nao tem esse dia."""
+
+    foreach_axes: tuple[str, ...] = ()
+    """Quais eixos o `foreach:` de origem declarava, em ordem.
+
+    Existe para o executor concorrente poder exigir `('bkt',)` EXATO em vez de
+    "tem bkt entre os eixos". A diferenca importa: num produto `bkt x year` as
+    execucoes de um mesmo balde cobrem varios anos, e passo por ano nao tem
+    prova de independencia — varios leem a saida do ano anterior. Hoje o
+    pipeline nao tem esse produto (18 passos so-`bkt`, 3 so-`year`), entao a
+    regra estrita nao custa cobertura; ela custa se alguem criar o produto
+    depois, que e exatamente quando se quer custar."""
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "Step":
@@ -295,6 +321,8 @@ def expand_foreach(step: Step) -> list[Step]:
                 name=StepName(f"{step.name}{suffix}"),
                 params={**step.params, **assignment},
                 foreach={},
+                foreach_origin=step.name,
+                foreach_axes=tuple(axes),
             )
         )
     return expanded
