@@ -18,8 +18,40 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
+import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, NewType
+
+# `${VAR}` num valor de `params:` vem do ambiente (e portanto do `.env`, que o
+# config/settings.py carrega com load_dotenv). Existe para que as RAIZES
+# (`out`, `bronze`, `silver`, `oracle`) morem num lugar so, em vez de repetidas
+# como literal em cada manifesto — mudar de disco passa a ser editar o `.env`.
+_ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expande_env(valor: Any, passo: str, chave: str) -> Any:
+    """Troca ${VAR} pelo ambiente. ERRA se a variavel nao existe.
+
+    Falhar alto e deliberado: cair para string vazia transformaria
+    `${LABMA_OUT}/eventos/...` em `/eventos/...` e o passo escreveria na raiz
+    do sistema de arquivos — o tipo de erro que so aparece depois de gravar.
+    """
+    if not isinstance(valor, str):
+        return valor
+
+    def troca(m: "re.Match[str]") -> str:
+        nome = m.group(1)
+        v = os.environ.get(nome)
+        if v is None or v == "":
+            raise ValueError(
+                f"passo '{passo}', param '{chave}': a variavel de ambiente "
+                f"'{nome}' nao esta definida (nem no .env). Sem ela o caminho "
+                f"viraria relativo a raiz do sistema de arquivos."
+            )
+        return v
+
+    return _ENV.sub(troca, valor)
 
 log = logging.getLogger(__name__)
 
@@ -161,7 +193,10 @@ class Step:
                 f"step '{raw['name']}': cleanup_mode must be 'drop' or "
                 f"'truncate', got '{cleanup_mode}'"
             )
-        params = dict(raw.get("params") or {})
+        params = {
+            k: _expande_env(v, raw["name"], k)
+            for k, v in (raw.get("params") or {}).items()
+        }
         return cls(
             name=StepName(raw["name"]),
             type=raw["type"],

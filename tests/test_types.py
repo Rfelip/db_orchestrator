@@ -275,3 +275,48 @@ class TestProduces:
         expanded = expand_foreach(step)
         assert [e.produces for e in expanded] == ["{{ out }}/qx_{{ bkt }}.parquet"] * 2
         assert [e.params["bkt"] for e in expanded] == [0, 1]
+
+
+# ── ${VAR} nos params vem do ambiente (2026-08-01) ────────────────────────────
+# As raizes (`out`, `bronze`, `silver`, `oracle`) moravam como literal em cada
+# manifesto; agora vem do `.env`. O caso que importa e o NEGATIVO: variavel
+# ausente tem de ERRAR, porque cair para string vazia faria
+# `${LABMA_OUT}/eventos/x` virar `/eventos/x` e o passo gravaria na raiz do
+# sistema de arquivos — erro que so apareceria depois de ja ter escrito.
+def _passo(params):
+    return {
+        "name": "p",
+        "type": "sql",
+        "file": "x.sql",
+        "transaction_group": 1,
+        "params": params,
+    }
+
+
+def test_params_expandem_variavel_de_ambiente(monkeypatch):
+    monkeypatch.setenv("LABMA_OUT_TESTE", "/mnt/disco/saida")
+    s = Step.from_dict(_passo({"out": "${LABMA_OUT_TESTE}"}))
+    assert s.params["out"] == "/mnt/disco/saida"
+
+
+def test_params_expandem_no_meio_da_string(monkeypatch):
+    monkeypatch.setenv("R", "/raiz")
+    s = Step.from_dict(_passo({"p": "${R}/sub/${R}"}))
+    assert s.params["p"] == "/raiz/sub//raiz"
+
+
+def test_variavel_ausente_erra_em_vez_de_virar_vazio(monkeypatch):
+    monkeypatch.delenv("NAO_EXISTE_MESMO", raising=False)
+    with pytest.raises(ValueError, match="NAO_EXISTE_MESMO"):
+        Step.from_dict(_passo({"out": "${NAO_EXISTE_MESMO}/eventos"}))
+
+
+def test_variavel_vazia_tambem_erra(monkeypatch):
+    monkeypatch.setenv("VAZIA", "")
+    with pytest.raises(ValueError, match="VAZIA"):
+        Step.from_dict(_passo({"out": "${VAZIA}/eventos"}))
+
+
+def test_valor_nao_string_passa_intacto(monkeypatch):
+    s = Step.from_dict(_passo({"n": 16, "flag": True}))
+    assert s.params["n"] == 16 and s.params["flag"] is True
