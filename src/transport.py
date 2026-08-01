@@ -28,6 +28,7 @@ import csv
 import io
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -591,8 +592,21 @@ def write_helper(path: Path) -> None:
 
     The ssh path uploads it with `tee`; this is how the local transport
     and the tests get the exact same program — the session protocol is
-    only worth testing against the code that will actually serve it."""
-    path.write_text(DUCKDB_HELPER, encoding="utf-8")
+    only worth testing against the code that will actually serve it.
+
+    ⚠ ATOMICO (2026-08-01), e nao por elegancia. Com `concurrency > 1` as N
+    sessoes compartilham UM transporte e chamam `_ensure_helper()` quase ao
+    mesmo tempo; o flag `_helper_written` nao e lock, entao as N passam pela
+    checagem e as N escrevem o mesmo arquivo. Com `write_text` isso e
+    truncar-e-escrever concorrente: um worker chega a iniciar o Python sobre um
+    arquivo PELA METADE. Foi exatamente o que derrubou a bancada em W=3
+    ("Expecting ':' delimiter ... char 8203", com o helper tendo 8795 bytes).
+    Escrever ao lado e renomear torna a publicacao atomica: todo leitor ve ou o
+    arquivo antigo inteiro ou o novo inteiro, nunca um meio-termo."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporario = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporario.write_text(DUCKDB_HELPER, encoding="utf-8")
+    os.replace(temporario, path)
 
 
 def _run_duckdb_helper(
