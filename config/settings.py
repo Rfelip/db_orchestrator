@@ -39,6 +39,11 @@ _TARGET_FIELDS = sorted(
         "preserve_insertion_order",
         "profile",
         "plan_dir",
+        # quantas sessoes DuckDB rodam lado a lado os lotes de `foreach` por
+        # balde. 1 = serial, o padrao. O fallback de "ultimo underscore" ja
+        # acertaria esta (e uma palavra so), mas depender do fallback para um
+        # knob documentado e o tipo de coisa que quebra quando alguem renomear.
+        "concurrency",
     ],
     key=len,
     reverse=True,
