@@ -411,6 +411,16 @@ def apply_settings(con, cfg):
         "SET preserve_insertion_order=%s"
         % ("true" if cfg["preserve_insertion_order"] else "false")
     )
+    # A BARRA DE PROGRESSO ESCREVE NO STDOUT, E O STDOUT AQUI E O PROTOCOLO.
+    # O DuckDB liga a barra sozinho depois de `progress_bar_time` (2 s por
+    # padrao), e ela sai no mesmo descritor por onde o helper devolve as
+    # respostas JSON — o leitor entao recebe uma linha truncada e estoura com
+    # "Expecting ',' delimiter: line 1 column ~8192".
+    # Latente desde sempre: so aparece quando um statement passa de 2 s. Ficou
+    # visivel ao dividir a memoria entre workers concorrentes, que deixou os
+    # statements mais lentos — mas W=1 tambem estava exposto.
+    # (Toda bancada em tests/perfil/ ja desligava isso a mao; o helper nao.)
+    con.execute("SET enable_progress_bar=false")
     if not cfg.get("profile"):
         return None
     # o slot separa sessoes CONCORRENTES: `tmp` e compartilhado, entao sem ele
