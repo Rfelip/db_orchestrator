@@ -258,7 +258,17 @@ def _validated_foreach(
     An axis whose name already appears in `params` is rejected rather
     than silently overridden: `params: {bkt: 3}` next to
     `foreach: {bkt: [0, 1]}` is a contradiction, and picking a winner
-    would hide it."""
+    would hide it.
+
+    An axis may also be a STRING containing `${VAR}`: the variable is
+    env-expanded (same rules as params — missing or empty is a hard
+    error) and split on whitespace/commas, with pure-digit items parsed
+    as ints so `_suffix` zero-pads them like a literal list. This is
+    what lets `manifest_refresh.yaml` take its year axis from
+    `LABMA_REFRESH_ANOS` at dispatch time while staying a versioned
+    file. The native runner (scripts/plano.py) deliberately does NOT
+    copy this: it only ever parses manifest_pipeline.yaml, whose axes
+    are all literal lists."""
     if raw is None:
         return {}
     if not isinstance(raw, Mapping) or not raw:
@@ -272,6 +282,16 @@ def _validated_foreach(
             raise ValueError(
                 f"step '{step_name}': foreach axis {axis!r} is not a valid param name"
             )
+        if isinstance(values, str):
+            expandido = _expande_env(values, step_name, f"foreach:{axis}")
+            itens = [t for t in re.split(r"[\s,]+", expandido) if t]
+            if not itens:
+                raise ValueError(
+                    f"step '{step_name}': foreach axis '{axis}' expanded to an "
+                    f"empty list from {values!r} — an empty axis would silently "
+                    f"run zero steps."
+                )
+            values = [int(t) if t.isdigit() else t for t in itens]
         if not isinstance(values, list) or not values:
             raise ValueError(
                 f"step '{step_name}': foreach axis '{axis}' must be a "

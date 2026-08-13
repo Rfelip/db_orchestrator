@@ -229,3 +229,48 @@ steps:
             duckdb_transport=transport,
         )
         assert executor.db_url is None
+
+
+class TestQuiet:
+    """`--quiet` corta a listagem do plano e o ruído por passo, e NADA mais:
+    a fila roda igual, o veredito e as falhas continuam saindo."""
+
+    def test_quiet_suprime_listagem_mas_roda_tudo(
+        self, tmp_path, transport, monkeypatch, capsys
+    ):
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        Executor(
+            manifest_path=_manifest(tmp_path, out_dir),
+            db_config={},
+            notifier_config={},
+            force=True,
+            duckdb_transport=transport,
+            quiet=True,
+        ).run()
+
+        saida = capsys.readouterr().out
+        assert "--- Execution Plan ---" not in saida
+        # a linha de contagem sobrevive — é o resumo que o log precisa
+        assert "tasks (" in saida
+        # e o trabalho aconteceu inteiro
+        assert len(sorted(out_dir.glob("*.parquet"))) == 5
+
+    def test_sem_quiet_listagem_continua(
+        self, tmp_path, transport, monkeypatch, capsys
+    ):
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        Executor(
+            manifest_path=_manifest(tmp_path, out_dir),
+            db_config={},
+            notifier_config={},
+            force=True,
+            duckdb_transport=transport,
+        ).run()
+
+        assert "--- Execution Plan ---" in capsys.readouterr().out

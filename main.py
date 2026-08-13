@@ -353,6 +353,14 @@ def main():
         action="store_true",
         help="Do not record completed steps. The run is then not resumable.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-step chatter: the full plan listing, one line per "
+        "completed/disabled step, and duration-triggered Step Completed "
+        "alerts. Start, counts, the final verdict, failures and explicit "
+        "notify opt-ins all survive.",
+    )
 
     args = parser.parse_args()
 
@@ -463,6 +471,7 @@ def main():
             enable_all=args.enable_all,
             target=args.target,
             plan_dir=args.plan_dir,
+            quiet=args.quiet,
             resume=ResumeOptions(
                 run_id=args.resume,
                 start=args.from_step,

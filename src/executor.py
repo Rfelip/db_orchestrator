@@ -65,6 +65,7 @@ class Executor:
         plan_store=None,
         ledger=None,
         resume=None,
+        quiet=False,
     ):
         """
         Initialize the Executor.
@@ -90,6 +91,13 @@ class Executor:
             resume (ResumeRequest | None): A loaded prior ledger plus the
                 optional `--from` / `--until` window. None runs the whole
                 enabled plan, exactly as before.
+            quiet (bool): Suppress the per-step chatter — the full plan
+                listing, one log line per completed/disabled step, and the
+                duration-triggered "Step Completed" alerts. Start, counts,
+                the final verdict, failures, Job Started/Finished and
+                explicit `notify:`/`ping_on_end` opt-ins all survive: quiet
+                is about the ~900 lines that say "segue igual", not about
+                the ones that carry the verdict.
         """
         self.manifest_path = manifest_path
         self.db_config = db_config
@@ -100,6 +108,17 @@ class Executor:
         self.plan_store = plan_store
         self.ledger = ledger
         self.resume = resume
+        self.quiet = quiet
+        # Per-step lines drop to DEBUG under quiet instead of vanishing:
+        # a verbose log handler can still capture them if someone needs to.
+        self._log_passo = log.debug if quiet else log.info
+        if quiet:
+            for barulhento in (
+                "src.yaml_manager",
+                "src.notifier",
+                "src.duckdb_session",
+            ):
+                logging.getLogger(barulhento).setLevel(logging.WARNING)
 
         self.yaml_manager = YamlManager(manifest_path)
         self.notifier = build_notifier(notifier_config)
@@ -187,9 +206,13 @@ class Executor:
                 plan_items.append(("step", None, [step]))
                 i += 1
 
-        # 3. Print Plan
-        print("\n--- Execution Plan ---")
-        for idx, (item_type, group_id, steps) in enumerate(plan_items, 1):
+        # 3. Print Plan. Under --quiet only the count line survives — em 400
+        # passos a listagem é o que enterra o começo e o fim do log.
+        if not self.quiet:
+            print("\n--- Execution Plan ---")
+        for idx, (item_type, group_id, steps) in enumerate(
+            [] if self.quiet else plan_items, 1
+        ):
             if item_type == "joined":
                 descs = [s.description for s in steps if s.description]
                 desc = f"\n     {descs[0]}" if descs else ""
@@ -793,10 +816,10 @@ class Executor:
             current_session = db_manager.get_session()
             current_group = step_group
             if step_group is not None:
-                log.info(f"Started transaction group {current_group}")
+                self._log_passo(f"Started transaction group {current_group}")
         if not current_session:
             current_session = db_manager.get_session()
-        log.info(f"Processing step: {step.name}")
+        self._log_passo(f"Processing step: {step.name}")
         return current_session, current_group
 
     def _close_session(self, session, group, *, commit: bool):
@@ -806,7 +829,7 @@ class Executor:
         if session is None:
             return None, None
         if commit:
-            log.info(f"Committing transaction group {group}")
+            self._log_passo(f"Committing transaction group {group}")
             session.commit()
         else:
             session.rollback()
@@ -868,7 +891,9 @@ class Executor:
         yaml_manager.disable_step(step.name)
         if not notify:
             return
-        if not (step.notify or duration > 5):
+        # Quiet mata só o alerta IMPLÍCITO (disparado por duração): num run de
+        # 400 passos ele vira dezenas de pings. O opt-in explícito fica.
+        if not (step.notify or (not self.quiet and duration > 5)):
             return
         desc = f"\n{step.description}" if step.description else ""
         self.notifier.send_alert(

@@ -360,6 +360,7 @@ def run_manifest(
     target: str | None = None,
     plan_dir: Path | str | None = None,
     resume: "ResumeOptions | None" = None,
+    quiet: bool = False,
 ) -> None:
     """Load and execute a YAML manifest end-to-end.
 
@@ -410,6 +411,7 @@ def run_manifest(
         plan_store=plans,
         ledger=ledger,
         resume=request,
+        quiet=quiet,
     )
     executor.run()
 

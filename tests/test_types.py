@@ -320,3 +320,57 @@ def test_variavel_vazia_tambem_erra(monkeypatch):
 def test_valor_nao_string_passa_intacto(monkeypatch):
     s = Step.from_dict(_passo({"n": 16, "flag": True}))
     assert s.params["n"] == 16 and s.params["flag"] is True
+
+
+class TestForeachDeAmbiente:
+    """Eixo `foreach` vindo de `${VAR}` — o que o manifest_refresh usa para
+    receber os anos defasados do mr3.sh sem deixar de ser arquivo versionado."""
+
+    def test_string_expande_e_vira_lista_de_ints(self, monkeypatch):
+        monkeypatch.setenv("ANOS_TESTE", "2024 2025")
+        steps = expand_foreach(
+            Step.from_dict(
+                {
+                    "name": "silver_at",
+                    "type": "sql",
+                    "foreach": {"year": "${ANOS_TESTE}"},
+                }
+            )
+        )
+        assert [s.name for s in steps] == ["silver_at_year2024", "silver_at_year2025"]
+        # ints de verdade: o zero-padding do _suffix depende disso.
+        assert [s.params["year"] for s in steps] == [2024, 2025]
+
+    def test_virgulas_tambem_separam(self, monkeypatch):
+        monkeypatch.setenv("ANOS_TESTE", "2023,2024, 2025")
+        steps = expand_foreach(
+            Step.from_dict(
+                {"name": "s", "type": "sql", "foreach": {"year": "${ANOS_TESTE}"}}
+            )
+        )
+        assert [s.params["year"] for s in steps] == [2023, 2024, 2025]
+
+    def test_variavel_ausente_erra_alto(self, monkeypatch):
+        monkeypatch.delenv("NAO_EXISTE_MESMO", raising=False)
+        with pytest.raises(ValueError, match="NAO_EXISTE_MESMO"):
+            Step.from_dict(
+                {"name": "s", "type": "sql", "foreach": {"year": "${NAO_EXISTE_MESMO}"}}
+            )
+
+    def test_variavel_que_expande_para_vazio_erra(self, monkeypatch):
+        # `${V}` com V="  " passa pelo _expande_env (não é vazia) mas viraria
+        # eixo de zero itens — zero passos rodando em silêncio.
+        monkeypatch.setenv("SO_ESPACO", "  ")
+        with pytest.raises(ValueError, match="empty"):
+            Step.from_dict(
+                {"name": "s", "type": "sql", "foreach": {"year": "${SO_ESPACO}"}}
+            )
+
+    def test_item_nao_numerico_fica_string(self, monkeypatch):
+        monkeypatch.setenv("MISTO", "2024 extra")
+        steps = expand_foreach(
+            Step.from_dict(
+                {"name": "s", "type": "sql", "foreach": {"year": "${MISTO}"}}
+            )
+        )
+        assert [s.params["year"] for s in steps] == [2024, "extra"]
