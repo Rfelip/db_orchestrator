@@ -173,7 +173,7 @@ class TestDuckDbSettings:
         s = DuckDbSettings()
         assert s.memory_limit == "16GB"
         assert s.threads == 8
-        assert s.preserve_insertion_order is False
+        assert s.preserve_insertion_order is True
 
     def test_temp_directory_defaults_off_the_raid(self):
         # ~ is the remote user's home, which on MR3 is NVMe. /mnt/BANCOS

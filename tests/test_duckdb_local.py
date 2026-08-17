@@ -186,7 +186,7 @@ class TestSettingsReachDuckDb:
             }
         assert live["threads"] == settings.threads
         assert live["temp_directory"] == settings.temp_directory
-        assert live["preserve_insertion_order"] is False
+        assert live["preserve_insertion_order"] is True
         assert _declares(live["memory_limit"], 2e9), live["memory_limit"]
         assert _declares(live["max_temp_directory_size"], 4e9), live[
             "max_temp_directory_size"

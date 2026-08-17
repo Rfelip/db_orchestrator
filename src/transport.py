@@ -256,13 +256,29 @@ class DuckDbSettings:
     `max_temp_directory_size` is mandatory and bounded: the box is
     shared, and an unbounded spill fills the root filesystem and takes
     down somebody else's session.
+
+    `preserve_insertion_order` defaults to TRUE since 2026-08-17 (it was
+    False). The pipeline's shape is "ORDER BY cpf_id, then COPY", and with
+    the flag off DuckDB is free to discard that ORDER BY — which it did,
+    costing 2,2-2,7x on the consumers and nearly tripling the artifact on
+    disk. Ten .sql files were compensating with a hand-written `SET` pair;
+    they now say nothing, because the default is right.
+
+    The cost is real and NOT yet measured on a full run: ordering
+    constrains parallelism in scans and partitioned writes, and only ~6 of
+    ~449 plan steps exploit it. A step that wants the old behaviour opts
+    out with `SET preserve_insertion_order = false` AND restores it at the
+    end of the file — the orchestrator holds ONE connection for the whole
+    run, so an unrestored opt-out silently disables ordering for every
+    later step. Gate 11 of `verify_pipeline_wiring.py` enforces the
+    restore.
     """
 
     memory_limit: str = "16GB"
     threads: int = 8
     temp_directory: str = "~/duckdb_spill"
     max_temp_directory_size: str = "512GB"
-    preserve_insertion_order: bool = False
+    preserve_insertion_order: bool = True
     profile: bool = False
 
     concurrency: int = 1
@@ -419,7 +435,7 @@ def apply_settings(con, cfg):
     # Latente desde sempre: so aparece quando um statement passa de 2 s. Ficou
     # visivel ao dividir a memoria entre workers concorrentes, que deixou os
     # statements mais lentos — mas W=1 tambem estava exposto.
-    # (Toda bancada em tests/perfil/ ja desligava isso a mao; o helper nao.)
+    # (Toda bancada ja desligava isso a mao; o helper nao.)
     con.execute("SET enable_progress_bar=false")
     if not cfg.get("profile"):
         return None
@@ -437,7 +453,8 @@ def apply_settings(con, cfg):
     # omissao. 'ALL' cobre DDL e COPY tambem.
     con.execute("SET profiling_coverage='ALL'")
     # SEM custom_profiling_settings, de proposito. Medido na bancada
-    # (tests/perfil/sonda_duckdb.py, 2026-07-31): o PADRAO traz 21 campos de topo
+    # (medido em 2026-07-31; ver docs/historia_otimizacao/capturar-perfil-duckdb.md):
+    # o PADRAO traz 21 campos de topo
     # e 12 por operador; uma lista curada por mim trazia 14 e 12. Ou seja, curar
     # so PERDE informacao — o default ja e o superconjunto, e nao cobra por isso
     # (1,47s vs 1,26s na mesma consulta, dentro do ruido).
