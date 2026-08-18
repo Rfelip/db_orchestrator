@@ -38,6 +38,7 @@ _TARGET_FIELDS = sorted(
         "max_temp_directory_size",
         "preserve_insertion_order",
         "partitioned_write_max_open_files",
+        "partitioned_write_flush_threshold",
         "profile",
         "plan_dir",
         # quantas sessoes DuckDB rodam lado a lado os lotes de `foreach` por

@@ -279,6 +279,17 @@ class DuckDbSettings:
     temp_directory: str = "~/duckdb_spill"
     max_temp_directory_size: str = "512GB"
     preserve_insertion_order: bool = True
+    partitioned_write_flush_threshold: int = 1_000_000
+    """Quantas linhas uma particao acumula antes de virar arquivo.
+
+    O padrao do DuckDB e 524.288. Cada despejo fecha um arquivo, entao o valor
+    e o piso do tamanho de arquivo quando a particao esta sendo despejada. Um
+    milhao mantem o arquivo na ordem de dezenas de MB nas tabelas largas desta
+    base, em vez de centenas de KB.
+
+    Anda junto com `partitioned_write_max_open_files`: o teto evita o despejo
+    por falta de slot, este define o tamanho quando o despejo acontece mesmo."""
+
     partitioned_write_max_open_files: int = 512
     """Quantas particoes um `COPY ... PARTITION_BY` mantem abertas de uma vez.
 
@@ -380,6 +391,10 @@ class DuckDbSettings:
                 cfg.get("partitioned_write_max_open_files")
                 or defaults.partitioned_write_max_open_files
             ),
+            partitioned_write_flush_threshold=int(
+                cfg.get("partitioned_write_flush_threshold")
+                or defaults.partitioned_write_flush_threshold
+            ),
             profile=coerce_bool(cfg.get("profile", defaults.profile)),
             concurrency=int(cfg.get("concurrency") or defaults.concurrency),
         )
@@ -397,6 +412,7 @@ class DuckDbSettings:
             "max_temp_directory_size": self.max_temp_directory_size,
             "preserve_insertion_order": self.preserve_insertion_order,
             "partitioned_write_max_open_files": self.partitioned_write_max_open_files,
+            "partitioned_write_flush_threshold": self.partitioned_write_flush_threshold,
             "profile": self.profile,
             "slot": self.slot,
         }
@@ -454,6 +470,10 @@ def apply_settings(con, cfg):
     con.execute(
         "SET partitioned_write_max_open_files=%d"
         % int(cfg.get("partitioned_write_max_open_files", 512))
+    )
+    con.execute(
+        "SET partitioned_write_flush_threshold=%d"
+        % int(cfg.get("partitioned_write_flush_threshold", 1_000_000))
     )
     # A BARRA DE PROGRESSO ESCREVE NO STDOUT, E O STDOUT AQUI E O PROTOCOLO.
     # O DuckDB liga a barra sozinho depois de `progress_bar_time` (2 s por
