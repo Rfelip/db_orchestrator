@@ -279,6 +279,23 @@ class DuckDbSettings:
     temp_directory: str = "~/duckdb_spill"
     max_temp_directory_size: str = "512GB"
     preserve_insertion_order: bool = True
+    partitioned_write_max_open_files: int = 512
+    """Quantas particoes um `COPY ... PARTITION_BY` mantem abertas de uma vez.
+
+    O padrao do DuckDB e 100. Quando a escrita tem MAIS particoes que isso e a
+    entrada nao chega agrupada por particao, o DuckDB despeja e reabre particao
+    o tempo todo, e cada despejo vira um arquivo. Medido nesta base, 185
+    particoes com entrada ordenada por `cpf_id`: 1.500 arquivos de 64 KB no
+    padrao contra 185 de 503 KB com o teto em 512 — um arquivo por particao,
+    sem custo de tempo (1,2 s contra 1,1 s).
+
+    O `eventos_final` tem 280 particoes e hoje entrega 24.808 arquivos; o
+    `contratos` esta na mesma condicao. Arquivo pequeno demais e caro para todo
+    leitor depois, e sera caro tambem para o Iceberg, cujo metadado cresce com a
+    contagem de arquivos.
+
+    O preco e memoria: cada particao aberta segura um buffer. Suba junto com
+    `memory_limit`, nao sozinho."""
     profile: bool = False
 
     concurrency: int = 1
@@ -359,6 +376,10 @@ class DuckDbSettings:
             preserve_insertion_order=coerce_bool(
                 cfg.get("preserve_insertion_order", defaults.preserve_insertion_order)
             ),
+            partitioned_write_max_open_files=int(
+                cfg.get("partitioned_write_max_open_files")
+                or defaults.partitioned_write_max_open_files
+            ),
             profile=coerce_bool(cfg.get("profile", defaults.profile)),
             concurrency=int(cfg.get("concurrency") or defaults.concurrency),
         )
@@ -375,6 +396,7 @@ class DuckDbSettings:
             "temp_directory": self.temp_directory,
             "max_temp_directory_size": self.max_temp_directory_size,
             "preserve_insertion_order": self.preserve_insertion_order,
+            "partitioned_write_max_open_files": self.partitioned_write_max_open_files,
             "profile": self.profile,
             "slot": self.slot,
         }
@@ -426,6 +448,12 @@ def apply_settings(con, cfg):
     con.execute(
         "SET preserve_insertion_order=%s"
         % ("true" if cfg["preserve_insertion_order"] else "false")
+    )
+    # Sem isto o DuckDB reabre particao a cada despejo e cada despejo vira um
+    # arquivo: 24.808 arquivos onde cabem 280. Ver DuckDbSettings.
+    con.execute(
+        "SET partitioned_write_max_open_files=%d"
+        % int(cfg.get("partitioned_write_max_open_files", 512))
     )
     # A BARRA DE PROGRESSO ESCREVE NO STDOUT, E O STDOUT AQUI E O PROTOCOLO.
     # O DuckDB liga a barra sozinho depois de `progress_bar_time` (2 s por

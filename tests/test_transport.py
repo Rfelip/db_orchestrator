@@ -218,6 +218,24 @@ class TestDuckDbSettings:
     def test_from_mapping_absent_keys_keep_defaults(self):
         assert DuckDbSettings.from_mapping({}) == DuckDbSettings()
 
+    def test_partitioned_write_ceiling_clears_the_widest_write(self):
+        # `eventos_final` grava 280 particoes. Abaixo disso o DuckDB despeja e
+        # reabre particao, e cada despejo vira um arquivo pequeno.
+        assert DuckDbSettings().partitioned_write_max_open_files >= 280
+
+    def test_partitioned_write_ceiling_travels_para_o_helper(self):
+        # O helper remoto so ve o payload; um campo que nao viaja nao vira SET.
+        assert (
+            DuckDbSettings(partitioned_write_max_open_files=333).as_payload()[
+                "partitioned_write_max_open_files"
+            ]
+            == 333
+        )
+
+    def test_partitioned_write_ceiling_reads_env_style_strings(self):
+        s = DuckDbSettings.from_mapping({"partitioned_write_max_open_files": "1024"})
+        assert s.partitioned_write_max_open_files == 1024
+
     def test_payload_ships_temp_directory_unexpanded(self):
         # Only the remote knows where ~ is.
         payload = DuckDbSettings().as_payload()
