@@ -19,6 +19,13 @@ from src.ledger import (
 from src.yaml_manager import YamlManager
 from src.parser import SQLParser
 from src.notifier import build_notifier
+
+# O alerta implícito por passo dispara só acima disto. Era 5 s: num plano de
+# 492 passos isso virou 141 mensagens no Discord numa execução só (medido
+# 2026-08-18), e a única defesa era o `--quiet`, que apagava tudo. A cadência
+# regular agora é uma mensagem por GRUPO de transação; este corte fica para o
+# passo individualmente pesado, que merece aparecer sozinho.
+SEGUNDOS_ALERTA_PASSO = 300
 from src.utils import render_template
 from src.reporter import Reporter
 from src.profiler import OracleMonitorProfiler, PostgresExplainProfiler
@@ -274,6 +281,7 @@ class Executor:
 
             log.info("All tasks completed successfully.")
 
+            self.avisa_ultimo_grupo(executed_steps)
             total_duration = time.time() - job_start_time
             steps_summary = self._format_steps_summary(executed_steps)
 
@@ -891,15 +899,64 @@ class Executor:
         yaml_manager.disable_step(step.name)
         if not notify:
             return
-        # Quiet mata só o alerta IMPLÍCITO (disparado por duração): num run de
-        # 400 passos ele vira dezenas de pings. O opt-in explícito fica.
-        if not (step.notify or (not self.quiet and duration > 5)):
+        self._avisa_grupo_fechado(executed_steps)
+        # Quiet mata só o alerta IMPLÍCITO (disparado por duração). O opt-in
+        # explícito do manifesto (`notify:`) fica de pé nos dois modos.
+        if not (step.notify or (not self.quiet and duration > SEGUNDOS_ALERTA_PASSO)):
             return
         desc = f"\n{step.description}" if step.description else ""
         self.notifier.send_alert(
             "Step Completed",
             f"Step '{step.name}' completed in {duration:.2f}s.{desc}",
             ping=step.ping_on_end,
+        )
+
+    def _avisa_grupo_fechado(self, executed_steps) -> None:
+        """Uma mensagem por GRUPO de transação concluído.
+
+        É a cadência regular da execução: em vez de um ping por passo, um por
+        grupo — 26 no plano de hoje contra as 141 que o corte por duração
+        produzia. O disparo é por BORDA: quando o passo recém-registrado troca
+        de grupo, o grupo anterior acabou de fechar. Como os dois caminhos de
+        execução (sessão e DuckDB) passam por `_post_process_step` na ordem da
+        fila, o gancho vale para os dois sem tocar no controle de fluxo de
+        nenhum.
+
+        O último grupo não tem borda depois dele: quem o fecha é o
+        `avisa_ultimo_grupo`, chamado no fim do `run`.
+        """
+        if len(executed_steps) < 2:
+            return
+        if executed_steps[-1].get("group") == executed_steps[-2].get("group"):
+            return
+        self._despacha_aviso_de_grupo(executed_steps[:-1])
+
+    def avisa_ultimo_grupo(self, executed_steps) -> None:
+        """Fecha o grupo que ficou aberto quando a fila terminou."""
+        if executed_steps:
+            self._despacha_aviso_de_grupo(executed_steps)
+
+    def _despacha_aviso_de_grupo(self, ate_aqui) -> None:
+        grupo = ate_aqui[-1].get("group")
+        passos = []
+        for entrada in reversed(ate_aqui):
+            if entrada.get("group") != grupo:
+                break
+            passos.append(entrada)
+        passos.reverse()
+        total = sum(p["duration"] for p in passos)
+        nome = self.nome_do_grupo(p["name"] for p in passos)
+        plural = "passo" if len(passos) == 1 else "passos"
+        # Sai nos DOIS canais a partir de uma fonte só: o Discord recebe a
+        # cadência baixa, e o stdout fica observável — uma linha por grupo,
+        # com etiqueta estável, é o que um monitor consegue seguir sem ler o
+        # log inteiro. Sob `--quiet` o stdout emagrece, e esta linha é
+        # justamente a que não pode sumir: sem ela, silêncio e sucesso ficam
+        # indistinguíveis.
+        log.info(f"[grupo] {nome} — {len(passos)} {plural} em {total:.1f}s")
+        self.notifier.send_alert(
+            "Grupo concluído",
+            f"**{nome}** — {len(passos)} {plural} em {total:.1f}s",
         )
 
     def _handle_step_error(self, step, exc, current_session, notify) -> None:
@@ -1376,6 +1433,39 @@ class Executor:
             log.error(f"Python script failed: {e.stderr}")
             raise
 
+    @staticmethod
+    def nome_do_grupo(nomes) -> str:
+        """O nome de uma tarefa, a partir dos nomes dos passos dela.
+
+        Um grupo de transação quase sempre é o leque de um `foreach:` —
+        `silver_at_year2005..2025`, `pessoa_resumo_bkt00..15` —, então o
+        prefixo comum É o nome da tarefa e os sufixos são o eixo. Sem prefixo
+        comum, `primeiro … último` diz mais do que o número do grupo, que era
+        o que saía antes: agrupar apagava todos os nomes, justamente nos
+        grupos maiores.
+        """
+        nomes = list(nomes)
+        if not nomes:
+            return "(vazio)"
+        if len(nomes) == 1:
+            return nomes[0]
+        prefixo = nomes[0]
+        for n in nomes[1:]:
+            while not n.startswith(prefixo):
+                prefixo = prefixo[:-1]
+                if not prefixo:
+                    return f"{nomes[0]} … {nomes[-1]}"
+        # O prefixo bruto corta no meio do token — `silver_at_year2005` e
+        # `silver_at_year2025` têm `silver_at_year20` em comum. Recuar até a
+        # fronteira devolve o eixo inteiro do lado do sufixo.
+        prefixo = prefixo.rstrip("0123456789").rstrip("_")
+        # Prefixo curto demais não identifica nada; aí o par vale mais.
+        if len(prefixo) < 4:
+            return f"{nomes[0]} … {nomes[-1]}"
+        corte = len(prefixo)
+        a, b = nomes[0][corte:].lstrip("_"), nomes[-1][corte:].lstrip("_")
+        return f"{prefixo} {a}…{b}" if a or b else prefixo
+
     def _format_steps_summary(self, executed_steps):
         """Groups executed steps by transaction_group for summary display."""
         lines = []
@@ -1394,8 +1484,9 @@ class Executor:
                     group_steps.append(executed_steps[i])
                     i += 1
                 total = sum(gs["duration"] for gs in group_steps)
+                nome = self.nome_do_grupo(gs["name"] for gs in group_steps)
                 lines.append(
-                    f"Task {task_idx} - Group {group} ({len(group_steps)} steps) - time taken: {total:.2f}s"
+                    f"Task {task_idx} - {nome} ({len(group_steps)} steps) - time taken: {total:.2f}s"
                 )
             else:
                 lines.append(
