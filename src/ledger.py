@@ -11,7 +11,10 @@ reads that ledger back and skips the steps it proves are done.
 **The window selector** answers *"just run this part"*. `--from` /
 `--until` cut a range out of the *expanded* plan by substring match on
 step names, which is the ergonomics the old `scripts/run_pipeline.py`
-had and the only one that ever worked on `foreach` output.
+had and the only one that ever worked on `foreach` output. `--skip`
+answers the other half of that question: a window is contiguous, and
+the step a given run has no reason to redo usually sits in the middle
+of one.
 
 Both operate on expanded names (`qx_bkt03_year2019`), because they run
 against `ManifestConfig.steps` — post-expansion — rather than against
@@ -70,7 +73,7 @@ class LedgerNotFoundError(FileNotFoundError):
 
 
 class NoStepMatchedError(ValueError):
-    """`--from` / `--until` matched no step in the expanded plan.
+    """`--from` / `--until` / `--skip` matched no step in the expanded plan.
 
     Loud on purpose: silently running the whole 345-step pipeline
     because a substring had a typo is the expensive failure here.
@@ -128,6 +131,9 @@ class ResumeOptions:
     """Ledger run to resume from. `'last'` is resolved by the shell."""
     start: str | None = None
     until: str | None = None
+    exclude: tuple[str, ...] = ()
+    """Substrings whose steps this run drops. `start` / `until` cut a
+    contiguous range; this removes steps from inside it."""
     root: str = "reports/plans"
     record: bool = True
     """Write a ledger for this run. Off only for callers that want the
@@ -142,6 +148,7 @@ class ResumeRequest:
     prior: tuple[LedgerEntry, ...] = ()
     start: str | None = None
     until: str | None = None
+    exclude: tuple[str, ...] = ()
     source_run_id: str | None = None
 
 
@@ -165,6 +172,26 @@ def select_window(
             f"--until {until!r} (step {names[last]!r}) — empty window"
         )
     return first, last + 1
+
+
+def select_excluded(names: Sequence[str], exclude: Sequence[str]) -> frozenset[str]:
+    """The names `exclude` drops, by substring match. One needle may take
+    a whole `foreach` group, the way `--until qx_bkt03` does.
+
+    Matched against the WHOLE plan, not against the `--from`/`--until`
+    window: a caller that always passes the same exclusion would
+    otherwise start failing the day its window happens to fall outside
+    the excluded step. A needle that matches nothing in the plan still
+    raises, because what it hides (the excluded step running anyway) is
+    silent otherwise.
+    """
+    dropped: set[str] = set()
+    for needle in exclude:
+        hits = [name for name in names if needle in name]
+        if not hits:
+            raise NoStepMatchedError(_no_match_message(names, needle, "--skip"))
+        dropped.update(hits)
+    return frozenset(dropped)
 
 
 def _first_match(names: Sequence[str], needle: str, flag: str) -> int:
@@ -396,7 +423,9 @@ def load_resume_request(options: ResumeOptions) -> ResumeRequest:
     thing this whole module exists to prevent.
     """
     if options.run_id is None:
-        return ResumeRequest(start=options.start, until=options.until)
+        return ResumeRequest(
+            start=options.start, until=options.until, exclude=options.exclude
+        )
     run_id = (
         latest_ledger_run(options.root) if options.run_id == "last" else options.run_id
     )
@@ -404,6 +433,7 @@ def load_resume_request(options: ResumeOptions) -> ResumeRequest:
         prior=load_ledger(options.root, run_id),
         start=options.start,
         until=options.until,
+        exclude=options.exclude,
         source_run_id=run_id,
     )
 
@@ -425,6 +455,7 @@ __all__ = [
     "list_ledger_runs",
     "load_ledger",
     "load_resume_request",
+    "select_excluded",
     "select_window",
     "source_fingerprint",
 ]

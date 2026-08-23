@@ -349,6 +349,19 @@ def main():
         help="Stop after the LAST step whose name contains SUBSTR, inclusive.",
     )
     parser.add_argument(
+        "--skip",
+        type=str,
+        action="append",
+        default=[],
+        metavar="SUBSTR",
+        help="Drop every step whose name contains SUBSTR. Repeat the flag "
+        "for several (--skip cnis_pessoas --skip cnis_vinculos). This is "
+        "the hole --from/--until cannot cut: they select a contiguous "
+        "range, and the step you do not want is usually inside one. "
+        "Matched over the whole expanded plan and, like --from, errors if "
+        "nothing matches.",
+    )
+    parser.add_argument(
         "--no-ledger",
         action="store_true",
         help="Do not record completed steps. The run is then not resumable.",
@@ -476,6 +489,7 @@ def main():
                 run_id=args.resume,
                 start=args.from_step,
                 until=args.until,
+                exclude=tuple(args.skip),
                 root=args.plan_dir,
                 record=not args.no_ledger,
             ),

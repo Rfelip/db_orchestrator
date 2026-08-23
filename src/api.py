@@ -371,8 +371,9 @@ def run_manifest(
     TEMP TABLEs.
 
     `resume` (a `src.ledger.ResumeOptions`) controls two independent
-    things: which slice of the expanded plan to run (`start` / `until`)
-    and which prior run's ledger to skip completed steps from (`run_id`).
+    things: which slice of the expanded plan to run (`start` / `until`,
+    less the steps `exclude` names) and which prior run's ledger to skip
+    completed steps from (`run_id`).
     Omit it and the run behaves exactly as it did before resume existed —
     whole plan, no ledger.
 

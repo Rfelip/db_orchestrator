@@ -23,6 +23,7 @@ from src.ledger import (
     list_ledger_runs,
     load_ledger,
     load_resume_request,
+    select_excluded,
     select_window,
     source_fingerprint,
 )
@@ -91,6 +92,34 @@ class TestSelectWindow:
         with pytest.raises(NoStepMatchedError) as excinfo:
             select_window(NAMES, start="publish", until="load")
         assert "empty window" in str(excinfo.value)
+
+
+class TestSelectExcluded:
+    def test_nothing_excluded_drops_nothing(self):
+        assert select_excluded(NAMES, []) == frozenset()
+
+    def test_a_name_drops_exactly_that_step(self):
+        assert select_excluded(NAMES, ["load"]) == frozenset({"load"})
+
+    def test_several_needles_accumulate(self):
+        assert select_excluded(NAMES, ["load", "publish"]) == frozenset(
+            {"load", "publish"}
+        )
+
+    def test_one_needle_takes_a_whole_foreach_group(self):
+        assert select_excluded(NAMES, ["qx_"]) == frozenset(NAMES[1:4])
+
+    def test_unmatched_needle_raises_instead_of_running_the_step(self):
+        with pytest.raises(NoStepMatchedError) as excinfo:
+            select_excluded(NAMES, ["cnis_pessoas"])
+        assert "--skip 'cnis_pessoas'" in str(excinfo.value)
+
+    def test_exclusion_is_matched_over_the_plan_not_over_the_window(self):
+        # The caller that always passes the same --skip must not start
+        # failing the day its window falls outside the excluded step.
+        first, stop = select_window(NAMES, start="qx_")
+        dropped = select_excluded(NAMES, ["load"])
+        assert [n for n in NAMES[first:stop] if n not in dropped] == NAMES[1:]
 
 
 class TestDecideResume:
@@ -243,6 +272,12 @@ class TestLoadResumeRequest:
         )
         assert request.prior == ()
         assert (request.start, request.until) == ("qx", "publish")
+
+    def test_the_exclusions_reach_the_executor(self, tmp_path):
+        request = load_resume_request(
+            ResumeOptions(root=str(tmp_path), exclude=("cnis_pessoas",))
+        )
+        assert request.exclude == ("cnis_pessoas",)
 
     def test_last_resolves_to_the_newest_run(self, tmp_path):
         for run_id in ("20260730T090000", "20260730T100000"):

@@ -13,6 +13,7 @@ from src.ledger import (
     StepCheck,
     decide_resume,
     format_resume_banner,
+    select_excluded,
     select_window,
     source_fingerprint,
 )
@@ -96,8 +97,9 @@ class Executor:
                 later run can skip it. None keeps the old fire-and-forget
                 behaviour.
             resume (ResumeRequest | None): A loaded prior ledger plus the
-                optional `--from` / `--until` window. None runs the whole
-                enabled plan, exactly as before.
+                optional `--from` / `--until` window and the `--skip`
+                exclusions. None runs the whole enabled plan, exactly as
+                before.
             quiet (bool): Suppress the per-step chatter — the full plan
                 listing, one log line per completed/disabled step, and the
                 duration-triggered "Step Completed" alerts. Start, counts,
@@ -169,8 +171,8 @@ class Executor:
             )
             sys.exit(1)
 
-        # A bad --from/--until/--resume raises out of here on purpose: a
-        # mistyped selector must not degrade into "run all 345 steps".
+        # A bad --from/--until/--skip/--resume raises out of here on purpose:
+        # a mistyped selector must not degrade into "run all 345 steps".
         execution_queue = self._apply_resume(execution_queue)
 
         if not execution_queue:
@@ -322,8 +324,9 @@ class Executor:
     # ------- resume ----------------------------------------------------------
 
     def _apply_resume(self, queue):
-        """Narrow the plan to the `--from`/`--until` window, then drop the
-        steps a prior run's ledger proves are done.
+        """Narrow the plan to the `--from`/`--until` window, drop what
+        `--skip` names, then drop the steps a prior run's ledger proves are
+        done.
 
         Order matters: the window is what the human asked to run, and the
         ledger only ever removes work from inside it.
@@ -336,6 +339,19 @@ class Executor:
             names, start=self.resume.start, until=self.resume.until
         )
         window = queue[first:stop]
+        if self.resume.exclude:
+            # Before the ledger, not after: an excluded step is not part of
+            # this run at all, so it must not become the missing entry where
+            # the resume prefix stops and drags the rest of the plan with it.
+            dropped = select_excluded(names, self.resume.exclude)
+            window = [s for s in window if s.name not in dropped]
+            # Survives --quiet: it changes what ran, so reading it back off
+            # the log is how anyone tells this run from a whole one.
+            log.info(
+                "excluding %d step(s) by name: %s",
+                len(dropped),
+                ", ".join(sorted(dropped)),
+            )
         if not self.resume.prior:
             return window
         checks = [self._step_evidence(s) for s in window]

@@ -322,6 +322,37 @@ class TestWindowSelector:
                 resume=ResumeRequest(start="fan_bkt9"),
             )
 
+    def test_skip_cuts_a_step_out_of_the_middle(self, manifest, transport, tmp_path):
+        # The hole no window can cut: beta sits between alpha and the fan.
+        ran, _ = _run(
+            manifest,
+            transport,
+            tmp_path,
+            "R1",
+            resume=ResumeRequest(exclude=("beta",)),
+        )
+        assert ran == ["alpha", "fan_bkt0", "fan_bkt1"]
+
+    def test_skip_composes_with_the_window(self, manifest, transport, tmp_path):
+        ran, _ = _run(
+            manifest,
+            transport,
+            tmp_path,
+            "R1",
+            resume=ResumeRequest(until="fan_bkt0", exclude=("beta",)),
+        )
+        assert ran == ["alpha", "fan_bkt0"]
+
+    def test_an_unmatched_skip_raises(self, manifest, transport, tmp_path):
+        with pytest.raises(NoStepMatchedError):
+            _run(
+                manifest,
+                transport,
+                tmp_path,
+                "R1",
+                resume=ResumeRequest(exclude=("gamma",)),
+            )
+
 
 class TestBackwardCompatibility:
     def test_no_resume_argument_runs_the_whole_plan(
