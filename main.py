@@ -248,6 +248,15 @@ def main():
         help="Run all tasks in the manifest, ignoring the 'enabled: false' flag.",
     )
     parser.add_argument(
+        "--rearmar",
+        "--rearm",
+        action="store_true",
+        help="Clear every 'enabled: false' from the manifest FILE before "
+        "running, so the run starts from scratch. Unlike --enable-all, "
+        "which only ignores the flag in memory, this rewrites the tracker "
+        "the previous run left behind.",
+    )
+    parser.add_argument(
         "--bg",
         "--background",
         action="store_true",
@@ -473,6 +482,14 @@ def main():
         sys.exit(1)
 
     from src.ledger import ResumeOptions
+
+    # Before the plan is loaded, never under --dry-run: --plano must be able
+    # to answer "what would run" without editing the file it is reading.
+    if args.rearmar and not args.dry_run:
+        from src.yaml_manager import YamlManager
+
+        rearmados = YamlManager(manifest_path).enable_all_steps()
+        log.info(f"Re-armed {rearmados} step(s) before starting.")
 
     try:
         run_manifest(

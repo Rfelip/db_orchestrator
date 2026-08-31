@@ -5,6 +5,7 @@ import sys
 import time
 import logging
 import subprocess
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
 
@@ -164,6 +165,15 @@ class Executor:
 
             log.info(f"Loaded {len(all_steps)} steps. {len(execution_queue)} enabled.")
 
+            # How wide each foreach fan-out is, counted over the WHOLE plan
+            # rather than the queue: the declared parent is only done once
+            # every one of its expansions is, and a window or a resume
+            # narrowing the queue must not lower that bar.
+            self._expansoes_por_origem = Counter(
+                s.foreach_origin for s in all_steps if s.foreach_origin is not None
+            )
+            self._concluidas_por_origem = Counter()
+
         except Exception as e:
             log.critical(f"Failed to load manifest: {e}")
             self.notifier.send_alert(
@@ -285,15 +295,10 @@ class Executor:
 
             self.avisa_ultimo_grupo(executed_steps)
             total_duration = time.time() - job_start_time
-            steps_summary = self._format_steps_summary(executed_steps)
 
-            summary = (
-                f"Job finished successfully.\n\n"
-                f"**Total Duration:** {total_duration:.2f}s\n\n"
-                f"**Executed tasks:**\n{steps_summary if steps_summary else 'None'}"
+            self.notifier.send_alert(
+                "Job Finished", self._resumo_de_sucesso(total_duration)
             )
-
-            self.notifier.send_alert("Job Finished", summary)
 
         except Exception as e:
             log.critical(f"Execution failed: {e}")
@@ -371,6 +376,14 @@ class Executor:
             decision.start_at,
         )
         skipped = set(decision.skip)
+        # An expansion the ledger proves finished counts toward its parent
+        # just like one this run executes. Without this a resumed run can
+        # never complete a fan-out it did not start, so the parent would
+        # stay armed forever and the manifest would keep re-running work
+        # the ledger already verified.
+        for s in window:
+            if s.name in skipped and s.foreach_origin is not None:
+                self._concluidas_por_origem[s.foreach_origin] += 1
         return [s for s in window if s.name not in skipped]
 
     def _prepare_output_dir(self, step) -> None:
@@ -816,7 +829,7 @@ class Executor:
         by_name = {r["name"]: r["duration"] for r in recs}
         for s in payload:
             self._record_in_ledger(s, by_name.get(s.name, 0.0))
-            yaml_manager.disable_step(s.name)
+            self._marca_no_manifesto(s)
         if notify:
             total = sum(r["duration"] for r in recs)
             if total > 5:
@@ -912,7 +925,7 @@ class Executor:
             }
         )
         self._record_in_ledger(step, duration)
-        yaml_manager.disable_step(step.name)
+        self._marca_no_manifesto(step)
         if not notify:
             return
         self._avisa_grupo_fechado(executed_steps)
@@ -926,6 +939,43 @@ class Executor:
             f"Step '{step.name}' completed in {duration:.2f}s.{desc}",
             ping=step.ping_on_end,
         )
+
+    def _resumo_de_sucesso(self, total_duration: float) -> str:
+        """O corpo do "Job Finished" quando tudo passou.
+
+        Sem a lista de tarefas: numa chegada ela são 53 linhas de nome e
+        duração que ninguém lê, e que empurram o veredicto e o total para
+        fora da tela do telefone. Quem quiser o detalhe tem o relatório
+        do run e as linhas `[grupo]` no log. O resumo da FALHA continua
+        inteiro, porque ali o detalhe é a razão de abrir a mensagem.
+        """
+        return (
+            f"Job finished successfully.\n\n**Total Duration:** {total_duration:.2f}s"
+        )
+
+    def _marca_no_manifesto(self, step) -> None:
+        """Write one completed step into the YAML tracker.
+
+        A plain step disarms itself. A `foreach` expansion cannot: its
+        name is generated at load time and exists nowhere in the source
+        file, so `disable_step` never matches it (see the note in
+        `types.expand_foreach`). Only the DECLARED parent can be written,
+        and only once every expansion of it is done — a run that died
+        halfway through a fan-out must come back to the whole fan-out,
+        not to the remainder it happens to have missed.
+
+        Before this, the tracker reached only the steps without
+        `foreach`, which in this pipeline is exactly modules 04 and 05.
+        Every successful run therefore ended by disarming the Tábua and
+        the marts and nothing else, and the next run skipped them.
+        """
+        origem = step.foreach_origin
+        if origem is None:
+            self.yaml_manager.disable_step(step.name)
+            return
+        self._concluidas_por_origem[origem] += 1
+        if self._concluidas_por_origem[origem] >= self._expansoes_por_origem[origem]:
+            self.yaml_manager.disable_step(origem)
 
     def _avisa_grupo_fechado(self, executed_steps) -> None:
         """Uma mensagem por GRUPO de transação concluído.
@@ -963,17 +1013,14 @@ class Executor:
         total = sum(p["duration"] for p in passos)
         nome = self.nome_do_grupo(p["name"] for p in passos)
         plural = "passo" if len(passos) == 1 else "passos"
-        # Sai nos DOIS canais a partir de uma fonte só: o Discord recebe a
-        # cadência baixa, e o stdout fica observável — uma linha por grupo,
-        # com etiqueta estável, é o que um monitor consegue seguir sem ler o
-        # log inteiro. Sob `--quiet` o stdout emagrece, e esta linha é
-        # justamente a que não pode sumir: sem ela, silêncio e sucesso ficam
-        # indistinguíveis.
+        # Só no stdout. Uma linha por grupo, com etiqueta estável, é o que um
+        # monitor segue sem ler o log inteiro, e sob `--quiet` é justamente a
+        # que não pode sumir: sem ela, silêncio e sucesso ficam
+        # indistinguíveis. No Discord ela era ruído — 53 mensagens numa
+        # chegada, entre o "Job Started" e o "Job Finished" que são o que
+        # alguém lendo o canal no telefone precisa ver. Falha e veredicto
+        # final continuam saindo lá.
         log.info(f"[grupo] {nome} — {len(passos)} {plural} em {total:.1f}s")
-        self.notifier.send_alert(
-            "Grupo concluído",
-            f"**{nome}** — {len(passos)} {plural} em {total:.1f}s",
-        )
 
     def _handle_step_error(self, step, exc, current_session, notify) -> None:
         """Roll back the open session, fire a failure alert with enough

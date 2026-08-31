@@ -45,7 +45,7 @@ class TestCadencia:
     def test_o_corte_do_alerta_por_passo_e_cinco_minutos(self):
         assert SEGUNDOS_ALERTA_PASSO == 300
 
-    def test_avisa_quando_o_grupo_troca(self):
+    def test_avisa_quando_o_grupo_troca(self, caplog):
         ex = Executor.__new__(Executor)
         ex.notifier = MagicMock()
         executados = [
@@ -53,13 +53,12 @@ class TestCadencia:
             {"name": "silver_at_year2006", "duration": 12.0, "group": 5},
             {"name": "pessoas_base", "duration": 58.0, "group": 6},
         ]
-        ex._avisa_grupo_fechado(executados)
-        ex.notifier.send_alert.assert_called_once()
-        assunto, corpo = ex.notifier.send_alert.call_args[0]
-        assert assunto == "Grupo concluído"
-        assert "silver_at_year 2005…2006" in corpo
-        assert "2 passos" in corpo
-        assert "22.0s" in corpo
+        with caplog.at_level("INFO"):
+            ex._avisa_grupo_fechado(executados)
+        # A cadência é a mesma; o canal é só o stdout desde que o Discord
+        # passou a receber apenas começo, fim e falha.
+        assert "[grupo] silver_at_year 2005…2006 — 2 passos em 22.0s" in caplog.text
+        ex.notifier.send_alert.assert_not_called()
 
     def test_nao_avisa_dentro_do_mesmo_grupo(self):
         ex = Executor.__new__(Executor)
@@ -72,18 +71,18 @@ class TestCadencia:
         )
         ex.notifier.send_alert.assert_not_called()
 
-    def test_o_ultimo_grupo_e_fechado_no_fim_do_run(self):
+    def test_o_ultimo_grupo_e_fechado_no_fim_do_run(self, caplog):
         ex = Executor.__new__(Executor)
         ex.notifier = MagicMock()
-        ex.avisa_ultimo_grupo(
-            [
-                {"name": "sim_match", "duration": 14.0, "group": 24},
-                {"name": "cnis_sim_enriquecido", "duration": 3.0, "group": 25},
-            ]
-        )
-        _, corpo = ex.notifier.send_alert.call_args[0]
-        assert "cnis_sim_enriquecido" in corpo
-        assert "1 passo" in corpo
+        with caplog.at_level("INFO"):
+            ex.avisa_ultimo_grupo(
+                [
+                    {"name": "sim_match", "duration": 14.0, "group": 24},
+                    {"name": "cnis_sim_enriquecido", "duration": 3.0, "group": 25},
+                ]
+            )
+        assert "cnis_sim_enriquecido" in caplog.text
+        assert "1 passo" in caplog.text
 
     def test_fila_vazia_nao_avisa_nada(self):
         ex = Executor.__new__(Executor)
