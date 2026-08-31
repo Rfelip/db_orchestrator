@@ -514,7 +514,20 @@ def main():
 
     except Exception as e:
         log.critical(f"An unexpected error occurred: {e}")
+        # The tracker is deliberately NOT cleared here. It is what --resume
+        # reads, and it is where a person sees how far the plan got.
         sys.exit(1)
+
+    # Symmetric with the re-arm above, and only on the way out of a run that
+    # PASSED: a finished plan has nothing left to resume, so the trail becomes
+    # a dirty working tree and nothing else. The deploy chain refuses to pull
+    # onto a dirty tree, so a trail left behind blocks the NEXT run — which,
+    # under the twelve-hourly watcher, is unattended.
+    if args.rearmar and not args.dry_run:
+        from src.yaml_manager import YamlManager
+
+        limpos = YamlManager(manifest_path).enable_all_steps()
+        log.info(f"Re-armed {limpos} step(s) after a clean run.")
 
 
 if __name__ == "__main__":
