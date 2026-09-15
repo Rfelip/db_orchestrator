@@ -49,14 +49,17 @@ class DiscordNotifier:
     headers; retries with exponential backoff on transient errors.
     """
 
-    def __init__(self, webhook_url: str, user_name: str = "Unknown") -> None:
+    def __init__(self, webhook_url: str, user_name: str = "Unknown",
+                 run_name: str = "") -> None:
         self.webhook_url = webhook_url
         self.user_name = user_name
+        self.run_name = run_name
 
     def send_alert(self, subject: str, message_body: str,
                     ping: str | None = None) -> None:
         ping_prefix = f"<@{ping}> " if ping else ""
-        header = f"{ping_prefix}**{subject}** (by {self.user_name})"
+        subj = f"{subject} — {self.run_name}" if self.run_name else subject
+        header = f"{ping_prefix}**{subj}** (by {self.user_name})"
         full_message = f"{header}\n\n{message_body}"
 
         if len(full_message) <= DISCORD_MAX_LENGTH:
@@ -132,10 +135,12 @@ class TelegramNotifier:
     API_URL = "https://api.telegram.org/bot{token}/sendMessage"
     _MD_SPECIAL = r"_*[]()~`>#+-=|{}.!"
 
-    def __init__(self, token: str, chat_id: str, user_name: str = "Unknown") -> None:
+    def __init__(self, token: str, chat_id: str, user_name: str = "Unknown",
+                 run_name: str = "") -> None:
         self.url = self.API_URL.format(token=token)
         self.chat_id = chat_id
         self.user_name = user_name
+        self.run_name = run_name
 
     def send_alert(self, subject: str, message_body: str,
                     ping: str | None = None) -> None:
@@ -261,16 +266,19 @@ def build_notifier(config: dict) -> Notifier:
     fan-out width — `send_alert(...)` always works.
     """
     user_name = config.get('user_name', 'Unknown')
+    run_name = config.get('run_name', '')
     children: list[Notifier] = []
 
     discord_url = config.get('discord_webhook_url')
     if discord_url:
-        children.append(DiscordNotifier(discord_url, user_name=user_name))
+        children.append(DiscordNotifier(discord_url, user_name=user_name,
+                                       run_name=run_name))
 
     tg_token = config.get('telegram_bot_token')
     tg_chat = config.get('telegram_chat_id')
     if tg_token and tg_chat:
-        children.append(TelegramNotifier(tg_token, str(tg_chat), user_name=user_name))
+        children.append(TelegramNotifier(tg_token, str(tg_chat), user_name=user_name,
+                                        run_name=run_name))
     elif tg_token or tg_chat:
         log.warning(
             "Telegram partially configured: both TELEGRAM_BOT_TOKEN and "

@@ -213,7 +213,11 @@ def load_notifier_config():
         "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL"),
         "telegram_bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
         "telegram_chat_id": os.getenv("TELEGRAM_CHAT_ID"),
-        "user_name": os.getenv("USER_NAME", "Unknown"),
+        # RUN_BY ganha de USER_NAME e NAO existe no .env de proposito:
+        # load_dotenv(override=True) so sobrepoe chaves que o .env define,
+        # entao quem despacha exporta RUN_BY sem sujar a lane humana.
+        "user_name": os.getenv("RUN_BY") or os.getenv("USER_NAME", "Unknown"),
+        "run_name": os.getenv("RUN_NAME", ""),
     }
 
 
