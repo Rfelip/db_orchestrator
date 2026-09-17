@@ -30,12 +30,13 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, replace
-from pathlib import Path
-from typing import Any, Mapping, Protocol
+from pathlib import Path, PurePosixPath
+from typing import Any, Mapping, Protocol, Sequence
 
 from src.database import DatabaseManager
 
@@ -724,7 +725,16 @@ class DuckDbTransport(Protocol):
     name: str
     settings: DuckDbSettings
 
+    paths_are_local: bool
+    """Whether `produces:` paths can be stat'd in-process. False means
+    every check costs an ssh, so the caller batches instead of asking
+    one path at a time."""
+
     def session_command(self) -> list[str]: ...
+
+    def ensure_parent(self, path: str) -> None: ...
+
+    def existing_paths(self, paths: Sequence[str]) -> set[str]: ...
 
 
 class DuckDbSshTransport:
@@ -754,6 +764,7 @@ class DuckDbSshTransport:
     """
 
     name = "ssh+duckdb"
+    paths_are_local = False
 
     def __init__(
         self,
@@ -807,6 +818,62 @@ class DuckDbSshTransport:
             )
         self._helper_synced = True
 
+    def ensure_parent(self, path: str) -> None:
+        """Create the parent of `path` on the host that writes it.
+
+        `COPY … TO` runs inside the remote DuckDB, so the directory has to
+        exist over there. Whenever this transport is in use the
+        orchestrator's own disk is a different machine, and on `deploy`
+        there is no `/srv/labma` to make the directory in.
+        """
+        parent = PurePosixPath(path).parent
+        proc = subprocess.run(
+            self._ssh_prefix() + ["mkdir", "-p", str(parent)],
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"failed to create {self.ssh}:{parent} (rc={proc.returncode}): "
+                f"{proc.stderr.decode('utf-8', 'replace')[:300]}"
+            )
+
+    def existing_paths(self, paths: Sequence[str]) -> set[str]:
+        """Which of `paths` exist on the host that writes them, in one ssh.
+
+        DuckDB's own `glob()` cannot answer this: it returns files and never
+        directories, so every directory-valued `produces:` would read as
+        missing and the resume prefix would stop at the first one. `test -e`
+        asks exactly what `Path.exists()` asks here.
+
+        The paths go over stdin, so a path never reaches a command line and
+        the remote shell cannot re-split it.
+        """
+        if not paths:
+            return set()
+        # Quoted as one argv element because ssh joins argv with spaces and
+        # hands the result to the far shell, which would otherwise re-split
+        # the loop into words.
+        # `exit 0` because a `while` loop exits with the status of its last
+        # command: a final path that is absent makes the last `test` fail, and
+        # the call would read as a broken ssh instead of an honest "not there".
+        guiao = (
+            'while IFS= read -r p; do [ -e "$p" ] && printf "%s\\n" "$p"; done; exit 0'
+        )
+        proc = subprocess.run(
+            self._ssh_prefix() + ["sh", "-c", shlex.quote(guiao)],
+            input="\n".join(paths).encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"failed to stat {len(paths)} path(s) on {self.ssh} "
+                f"(rc={proc.returncode}): "
+                f"{proc.stderr.decode('utf-8', 'replace')[:300]}"
+            )
+        return set(proc.stdout.decode("utf-8", "replace").splitlines())
+
     def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
         if params:
             raise NotImplementedError(
@@ -829,12 +896,12 @@ class DuckDbLocalTransport:
     whenever the orchestrator already runs where the data is. MR3 invokes
     `main.py` on MR3: an ssh transport there would `ssh` the box to
     itself, back through the comp20 hop, with no key installed. Moving
-    `main.py` to the laptop fixes the ssh but breaks everything the
-    executor does with paths — `_prepare_output_dir` and `--resume` stat
-    the local filesystem, so directories get made on the wrong machine
-    and resume verifies files that were never going to be there. Neither
-    placement works; running DuckDB locally is what makes one of them
-    work.
+    `main.py` off the box fixes the ssh, and `_prepare_output_dir` now
+    follows the transport rather than the local filesystem, so the
+    directories get made where the SQL will write them, and `--resume`
+    asks `existing_paths`, so it reads the disk that actually holds the
+    output. What running DuckDB locally still buys is a free stat: this
+    transport answers a path check in-process, and the ssh one cannot.
 
     Everything below the argv is shared with the ssh transport: same
     helper source, same JSON-line session protocol, same
@@ -850,6 +917,7 @@ class DuckDbLocalTransport:
     """
 
     name = "duckdb"
+    paths_are_local = True
 
     def __init__(
         self,
@@ -882,6 +950,15 @@ class DuckDbLocalTransport:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_helper(path)
         self._helper_written = True
+
+    def ensure_parent(self, path: str) -> None:
+        """Create the parent of `path`, which is on this machine: the
+        helper runs here, so the parquet lands here too."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+    def existing_paths(self, paths: Sequence[str]) -> set[str]:
+        """Which of `paths` exist, stat'd here, where the helper writes."""
+        return {p for p in paths if Path(p).exists()}
 
     def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
         if params:

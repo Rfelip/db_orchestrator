@@ -359,7 +359,16 @@ class Executor:
             )
         if not self.resume.prior:
             return window
-        checks = [self._step_evidence(s) for s in window]
+        # One batch, not one stat per step: with an ssh transport every
+        # check is a round trip, and the whole window is the same question.
+        declarados = [
+            render_template(s.produces, s.params) for s in window if s.produces
+        ]
+        if self.duckdb_transport is not None:
+            existentes = self.duckdb_transport.existing_paths(declarados)
+        else:
+            existentes = {p for p in declarados if Path(p).exists()}
+        checks = [self._step_evidence(s, existentes=existentes) for s in window]
         decision = decide_resume(checks, {e.step: e for e in self.resume.prior})
         banner = format_resume_banner(
             decision, total=len(window), run_id=self.resume.source_run_id
@@ -397,28 +406,51 @@ class Executor:
         that already exists for resume answers it too, and there is no second
         list to drift.
 
-        Same filesystem assumption `produces:` already makes for `--resume`,
-        which stats the path from the process running the executor. An
-        executor split from its data by a network is out of scope for both.
+        The directory is made wherever the SQL will run, which is the
+        transport's business: `ssh+duckdb` writes on the far host, and the
+        orchestrator dispatching it from `deploy` has no `/srv/labma` of its
+        own. `--resume` asks the same transport, in one batch, so it reads
+        the disk that holds the output rather than the orchestrator's.
         """
         if not step.produces:
             return
-        Path(render_template(step.produces, step.params)).parent.mkdir(
-            parents=True, exist_ok=True
-        )
+        destino = render_template(step.produces, step.params)
+        if self.duckdb_transport is not None:
+            self.duckdb_transport.ensure_parent(destino)
+            return
+        # The SQLAlchemy path keeps the in-process mkdir: its `produces:`
+        # paths have always been resolved by whoever ran the executor.
+        Path(destino).parent.mkdir(parents=True, exist_ok=True)
 
-    def _step_evidence(self, step):
+    def _step_evidence(self, step, *, existentes: set[str] | None = None):
         """Gather what is knowable about one planned step: its SQL
-        fingerprint, and whether its declared output is still there."""
+        fingerprint, and whether its declared output is still there.
+
+        `existentes` is the batched answer from the host that writes, which
+        the resume path gathers once for the whole window. Without it the
+        answer is only knowable when the paths are local: a remote check
+        costs an ssh per step, and `output_present=None` already means
+        "unknown" to the ledger, which is the truth then.
+        """
 
         produces = (
             render_template(step.produces, step.params) if step.produces else None
         )
+        if produces is None:
+            presente = None
+        elif existentes is not None:
+            presente = produces in existentes
+        elif self.duckdb_transport is None:
+            presente = Path(produces).exists()
+        elif self.duckdb_transport.paths_are_local:
+            presente = bool(self.duckdb_transport.existing_paths([produces]))
+        else:
+            presente = None
         return StepCheck(
             name=step.name,
             source_sha=source_fingerprint(step.file, step.params),
             produces=produces,
-            output_present=Path(produces).exists() if produces else None,
+            output_present=presente,
         )
 
     def _record_in_ledger(self, step, duration) -> None:
