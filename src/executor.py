@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import os
 import re
 import sys
 import time
@@ -55,6 +56,16 @@ def _build_url(db_config):
 
 # Setup local logger
 log = logging.getLogger(__name__)
+
+
+def _raizes_do_ambiente() -> dict[str, str]:
+    """As raizes `LABMA_*` que um passo `type: python` le, e mais nada.
+
+    O ambiente inteiro levaria os caminhos e os segredos desta maquina para a
+    outra. As raizes ja sao caminhos absolutos na maquina que tem os dados,
+    entao atravessam sem traducao.
+    """
+    return {k: v for k, v in os.environ.items() if k.startswith("LABMA_")}
 
 
 class Executor:
@@ -1512,6 +1523,18 @@ class Executor:
         Manifest params are forwarded as --key value CLI arguments,
         so any python step can use argparse to receive them.
         """
+        args: list[str] = []
+        for key, value in step.params.items():
+            args.extend([f"--{key}", str(value)])
+
+        # O passo corre onde os dados estao, e quem sabe isso e o transporte:
+        # com `ssh+duckdb` os parquets vivem no host de la, e o disco deste
+        # processo nao tem nenhum deles.
+        if self.duckdb_transport is not None:
+            log.info(f"Executing Python script: {step.file}")
+            self.duckdb_transport.run_script(step.file, args, _raizes_do_ambiente())
+            return
+
         file_path = Path(step.file)
         if not file_path.exists():
             raise FileNotFoundError(f"Python script not found: {file_path}")
@@ -1519,10 +1542,12 @@ class Executor:
         log.info(f"Executing Python script: {file_path}")
 
         try:
-            cmd = [sys.executable, str(file_path)]
-            for key, value in step.params.items():
-                cmd.extend([f"--{key}", str(value)])
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(
+                [sys.executable, str(file_path), *args],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
             log.info(f"Script output: {result.stdout}")
         except subprocess.CalledProcessError as e:
             log.error(f"Python script failed: {e.stderr}")

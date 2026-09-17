@@ -736,6 +736,10 @@ class DuckDbTransport(Protocol):
 
     def existing_paths(self, paths: Sequence[str]) -> set[str]: ...
 
+    def run_script(
+        self, script: str, args: Sequence[str], env: Mapping[str, str]
+    ) -> None: ...
+
 
 class DuckDbSshTransport:
     """Run DuckDB SQL on a remote host via `ssh [wsl] python3 <helper>`.
@@ -775,8 +779,12 @@ class DuckDbSshTransport:
         settings: DuckDbSettings | None = None,
         python: str = "python3",
         ssh_options: list[str] | None = None,
+        project_dir: str | None = None,
     ) -> None:
         self.ssh = ssh
+        # O checkout do lado de la. So os passos `type: python` precisam dele:
+        # o SQL viaja como texto e nao tem raiz nenhuma.
+        self.project_dir = project_dir
         self.helper_path = helper_path
         self.wsl = wsl
         self.settings = settings or DuckDbSettings()
@@ -874,6 +882,51 @@ class DuckDbSshTransport:
             )
         return set(proc.stdout.decode("utf-8", "replace").splitlines())
 
+    def run_script(
+        self, script: str, args: Sequence[str], env: Mapping[str, str]
+    ) -> None:
+        """Run a manifest's `type: python` step on the host that owns the data.
+
+        A python step is a process, not SQL: it opens its own DuckDB and reads
+        the parquet roots straight off disk. Run where the orchestrator runs,
+        it points at roots that exist only on the far host, which is how
+        `confere_silver` died with `No files found` while the silver it was
+        checking sat on MR3.
+
+        The interpreter is the project's own `.venv`, derived and not
+        configured: `uv` puts it there on both hosts, and a second value is
+        what would earn a knob.
+        """
+        if not self.project_dir:
+            raise RuntimeError(
+                f"cannot run '{script}' on {self.ssh}: this target has no "
+                f"project_dir, so there is no checkout to run it from. Set "
+                f"DB_TARGET_<NAME>_PROJECT_DIR to the checkout on that host."
+            )
+        raiz = PurePosixPath(self.project_dir)
+        argv = [str(raiz / ".venv/bin/python"), script, *args]
+        # `env` em vez de exports soltos: um valor com espacos ou aspas nao
+        # vira duas palavras no shell de la.
+        ambiente = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(env.items()))
+        remoto = "cd {} && exec env {} {}".format(
+            shlex.quote(str(raiz)),
+            ambiente,
+            " ".join(shlex.quote(a) for a in argv),
+        )
+        proc = subprocess.run(
+            self._ssh_prefix() + ["sh", "-c", shlex.quote(remoto)],
+            capture_output=True,
+            check=False,
+        )
+        saida = proc.stdout.decode("utf-8", "replace").strip()
+        if saida:
+            log.info("%s on %s: %s", script, self.ssh, saida)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"'{script}' failed on {self.ssh} (rc={proc.returncode}): "
+                f"{proc.stderr.decode('utf-8', 'replace')[-800:]}"
+            )
+
     def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
         if params:
             raise NotImplementedError(
@@ -959,6 +1012,28 @@ class DuckDbLocalTransport:
     def existing_paths(self, paths: Sequence[str]) -> set[str]:
         """Which of `paths` exist, stat'd here, where the helper writes."""
         return {p for p in paths if Path(p).exists()}
+
+    def run_script(
+        self, script: str, args: Sequence[str], env: Mapping[str, str]
+    ) -> None:
+        """Run a `type: python` step here, which is where this transport's
+        data is."""
+        caminho = Path(script)
+        if not caminho.exists():
+            raise FileNotFoundError(f"Python script not found: {caminho}")
+        proc = subprocess.run(
+            [self.python, str(caminho), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, **env},
+        )
+        if proc.stdout.strip():
+            log.info("%s: %s", script, proc.stdout.strip())
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"'{script}' failed (rc={proc.returncode}): {proc.stderr[-800:]}"
+            )
 
     def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> RawResult:
         if params:
@@ -1111,6 +1186,7 @@ def build_transport(
     threads: int = 8,
     settings: DuckDbSettings | None = None,
     python: str | None = None,
+    project_dir: str | None = None,
 ) -> Transport:
     """Return a transport based on the supplied arguments.
 
@@ -1154,6 +1230,7 @@ def build_transport(
             wsl=wsl,
             settings=settings or DuckDbSettings(threads=threads),
             python=python or "python3",
+            project_dir=project_dir,
         )
     if kind in ("duckdb", "duckdb+local", "local+duckdb"):
         return DuckDbLocalTransport(

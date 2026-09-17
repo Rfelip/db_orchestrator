@@ -31,6 +31,8 @@ _TARGET_FIELDS = sorted(
         "threads",
         "ssh_options",
         "python",
+        # O checkout no host do alvo, para os passos `type: python`.
+        "project_dir",
         # DuckDB run knobs. They belong to the target because they are a
         # property of the machine the SQL lands on, not of the SQL.
         "memory_limit",

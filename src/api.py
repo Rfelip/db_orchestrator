@@ -462,6 +462,7 @@ def _manifest_target(name: str) -> tuple[Any, Mapping[str, Any]]:
         helper_path=cfg.get("helper_path", "/tmp/_orch_duckdb.py"),
         settings=DuckDbSettings.from_mapping(cfg),
         python=cfg.get("python"),
+        project_dir=cfg.get("project_dir"),
     )
     return transport, cfg
 

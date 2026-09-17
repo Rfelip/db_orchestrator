@@ -211,3 +211,105 @@ def test_evidencia_sem_produces():
     got = Executor._step_evidence(ex, Step(name="seed", type="sql"))
 
     assert got.output_present is None
+
+
+# ── run_script: a python step runs where the parquet is ─────────────────
+def _remoto_de(corrido):
+    """The command string the far shell receives, unquoted."""
+    return shlex.split(corrido.call_args[0][0][4])[0]
+
+
+def test_run_script_corre_no_checkout_do_host_remoto():
+    t = ssh_transporte(project_dir="/home/ruan_f/labma/scripts_tabua")
+
+    with patch("src.transport.subprocess.run") as corrido:
+        corrido.return_value = SimpleNamespace(returncode=0, stdout=b"OK 2025", stderr=b"")
+        t.run_script(
+            "src/confere_silver.py",
+            ["--anos", "2025"],
+            {"LABMA_SILVER": "/srv/labma/silver/critica"},
+        )
+
+    assert corrido.call_args[0][0][:4] == ["ssh", "mr3-lan", "sh", "-c"]
+    remoto = _remoto_de(corrido)
+    assert remoto.startswith("cd /home/ruan_f/labma/scripts_tabua && exec env ")
+    # The project's own venv, not the orchestrator's interpreter: the steps
+    # need pandas and the vendored `ajuste`, which only that venv has.
+    assert "/home/ruan_f/labma/scripts_tabua/.venv/bin/python" in remoto
+    assert "src/confere_silver.py --anos 2025" in remoto
+    assert "LABMA_SILVER=/srv/labma/silver/critica" in remoto
+
+
+def test_run_script_sem_project_dir_diz_qual_a_definicao_que_falta():
+    t = ssh_transporte()
+
+    with pytest.raises(RuntimeError, match="PROJECT_DIR"):
+        t.run_script("src/confere_silver.py", [], {})
+
+
+def test_run_script_remoto_levanta_com_o_stderr():
+    t = ssh_transporte(project_dir="/home/ruan_f/labma/scripts_tabua")
+
+    with patch("src.transport.subprocess.run") as corrido:
+        corrido.return_value = SimpleNamespace(
+            returncode=1, stdout=b"", stderr=b"IO Error: No files found"
+        )
+        with pytest.raises(RuntimeError, match="No files found"):
+            t.run_script("src/confere_silver.py", [], {})
+
+
+def test_run_script_local_corre_aqui(tmp_path):
+    marca = tmp_path / "correu.txt"
+    script = tmp_path / "passo.py"
+    script.write_text(
+        "import os, sys\n"
+        f"open({str(marca)!r}, 'w').write(os.environ['LABMA_SILVER'] + ' ' + sys.argv[1])\n",
+        encoding="utf-8",
+    )
+    t = DuckDbLocalTransport(helper_path=str(tmp_path / "helper.py"))
+
+    t.run_script(str(script), ["--anos"], {"LABMA_SILVER": "/srv/labma/silver/critica"})
+
+    assert marca.read_text() == "/srv/labma/silver/critica --anos"
+
+
+def test_passo_python_vai_para_o_transporte():
+    class Espia(TransporteQueRegista):
+        def __init__(self):
+            super().__init__()
+            self.correu = None
+
+        def run_script(self, script, args, env):
+            self.correu = (script, list(args), dict(env))
+
+    t = Espia()
+    ex = SimpleNamespace(duckdb_transport=t)
+    step = Step(
+        name="confere_silver",
+        type="python",
+        file="src/confere_silver.py",
+        params={"anos": "2025"},
+    )
+
+    Executor._execute_python_step(ex, step)
+
+    script, args, _ = t.correu
+    assert (script, args) == ("src/confere_silver.py", ["--anos", "2025"])
+
+
+def test_so_as_raizes_labma_atravessam(monkeypatch=None):
+    """The whole environment would carry this host's paths and secrets."""
+    import os as _os
+
+    from src.executor import _raizes_do_ambiente
+
+    _os.environ["LABMA_TESTE_RAIZ"] = "/srv/labma/x"
+    _os.environ["SEGREDO_QUALQUER"] = "nao-atravessa"
+    try:
+        raizes = _raizes_do_ambiente()
+    finally:
+        _os.environ.pop("LABMA_TESTE_RAIZ", None)
+        _os.environ.pop("SEGREDO_QUALQUER", None)
+
+    assert raizes["LABMA_TESTE_RAIZ"] == "/srv/labma/x"
+    assert not any(k.startswith("SEGREDO") for k in raizes)
